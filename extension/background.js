@@ -210,62 +210,104 @@ async function startMultiCapture(params) {
  */
 async function captureChapter(tab, pageInfo, chapterNum) {
   let chapterFrames = [];
+  let duplicateCount = 0;
+  const MAX_DUP = 3; // 连续重复N帧则停止
 
-  // 章节锁：记录开始时的 URL 和标题（防止跳章）
-  const chapterSig = {
-    url: await getCurrentUrl(tab.id),
-    title: await getPageTitle(tab.id, false), // 不重试，避免等待
-  };
-  send('log', { text: `🔒 章节锁已设置: ${chapterSig.title} | ${chapterSig.url.slice(0, 50)}`, type: 'info' });
+  // 章节锁（只用URL）
+  const chapterSigUrl = await getCurrentUrl(tab.id);
+  send('log', { text: "🔒 章节锁: " + chapterSigUrl.slice(0,50), type: 'info' });
 
-  // 第1帧：当前视口顶部
+  // 第1帧
   let url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
   chapterFrames.push(url);
+  send('update', { frameCount: 1, status: "第" + chapterNum + "章: 1/" + pageInfo.totalFrames + "帧", totalFrames: pageInfo.totalFrames });
 
-  send('update', {
-    frameCount: 1,
-    status: `第${chapterNum}章: 1/${pageInfo.totalFrames}帧`,
-    totalFrames: pageInfo.totalFrames,
-  });
+  if (!pageInfo.canScroll) return chapterFrames;
 
-  if (!pageInfo.canScroll) {
-    return chapterFrames;
-  }
+  // 步长 = viewport高度 - 重叠30px
+  const stepSize = pageInfo.viewportH - 30;
+  send('log', { text: "📏 步长:" + stepSize + "px | viewport:" + pageInfo.viewportH + "px | 总高:" + pageInfo.scrollHeight + "px", type: 'info' });
 
-  // 降低滚动步长（防止触发 SPA 路由跳转）
-  const stepSize = Math.min(250, Math.floor(pageInfo.viewportH / 2)); // 最多 250px
-  send('log', { text: `📏 滚动步长: ${stepSize}px (viewport: ${pageInfo.viewportH}px)`, type: 'info' });
-
-  const loopCount = Math.min(pageInfo.totalFrames - 1, MAX_FRAMES - 1);
+  const loopCount = Math.min(pageInfo.totalFrames + 2, MAX_FRAMES);
   for (let i = 0; i < loopCount && running; i++) {
     try {
-      // 使用稳定滚动（等待滚动真正停止）
-      await stableScroll(tab.id, stepSize);
-      await sleep(delay); // 额外等待渲染
+      const beforeST = await getScrollTop(tab.id);
+      await scrollByViewport(tab.id, stepSize);
+      await sleep(delay);
 
-      // 章节锁检测：如果 URL 或标题变化了，说明跳章了
-      const currentUrl = await getCurrentUrl(tab.id);
-      const currentTitle = await getPageTitle(tab.id, false);
-      if (currentUrl !== chapterSig.url || (currentTitle && chapterSig.title && currentTitle !== chapterSig.title)) {
-        send('log', { text: `⚠️ 检测到跳章！停止采集本章。URL变化: ${currentUrl !== chapterSig.url} | 标题变化: ${currentTitle !== chapterSig.title}`, type: 'error' });
+      // 验证滚动
+      const afterST = await getScrollTop(tab.id);
+      const delta = afterST - beforeST;
+
+      if (Math.abs(delta) < 5) {
+        send('log', { text: "⛔ 滚动停止(delta=" + delta + "px)，到底了", type: 'info' });
+        break;
+      }
+
+      // URL 锁检测
+      if (await getCurrentUrl(tab.id) !== chapterSigUrl) {
+        send('log', { text: "⚠️ 跳章！URL变化", type: 'error' });
         break;
       }
 
       url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+      
+      // 帧去重
+      if (chapterFrames.length > 0) {
+        if (isDupFrame(chapterFrames[chapterFrames.length-1], url)) {
+          duplicateCount++;
+          if (duplicateCount >= MAX_DUP) {
+            send('log', { text: "⛔ 连续" + MAX_DUP + "帧重复，停止", type: 'warn' });
+            break;
+          }
+          continue;
+        }
+      }
+      duplicateCount = 0;
       chapterFrames.push(url);
 
       send('update', {
         frameCount: chapterFrames.length,
-        status: `第${chapterNum}章: ${chapterFrames.length}/${pageInfo.totalFrames}帧 (${Math.round(chapterFrames.length / pageInfo.totalFrames * 100)}%)`,
+        status: "第" + chapterNum + "章: " + chapterFrames.length + "/" + pageInfo.totalFrames + "帧 (delta:" + delta + "px)",
         totalFrames: pageInfo.totalFrames,
       });
-    } catch (e) {
-      console.error(`[captureChapter-${chapterNum}] error:`, e);
+    } catch(e) {
+      console.error("[ch" + chapterNum + "] err:", e);
       break;
     }
   }
 
+  send('log', { text: "✅ 第" + chapterNum + "章完成: " + chapterFrames.length + "帧", type: 'success' });
   return chapterFrames;
+}
+
+// 获取 scrollTop
+async function getScrollTop(tid) {
+  try {
+    var r = await chrome.scripting.executeScript({ target:{tabId:tid}, func:function(){
+      var els = [
+        document.querySelector('.reader-content'),
+        document.querySelector('.content'),
+        document.querySelector('[class*="reader"]'),
+        document.querySelector('[class*="muye"]'),
+        document.scrollingElement || document.documentElement
+      ];
+      for(var j=0;j<els.length;j++){ if(els[j]&&typeof els[j].scrollTop==='number') return els[j].scrollTop; }
+      return window.scrollY||0;
+    }});
+    return r[0].result||0;
+  }catch(_){return 0;}
+}
+
+// 帧去重
+function isDupFrame(a,b){
+  try{
+    var ba=(a.split(',')[1]||''), bb=(b.split(',')[1]||'');
+    if(Math.abs(ba.length-bb.length)>1000) return false;
+    var sa=ba.substring(500,2500), sb=bb.substring(500,2500), d=0, L=Math.min(sa.length,sb.length);
+    for(var k=0;k<L;k++){if(sa[k]!==sb[k])d++;}
+    return (d/L)<0.05;
+  }catch(_){return false;}
 }
 
 /**
@@ -732,17 +774,18 @@ async function getPageInfo(tabId) {
       const docSH = document.documentElement ? document.documentElement.scrollHeight : 0;
       let scrollHeight = Math.max(bodySH, docSH, viewportH);
 
-      // 找最大的 overflow 容器
+      // 找最大的 overflow 容器（收集候选信息）
       let containerEl = null;
+      const candidates = [];
       const allElements = document.querySelectorAll('*');
       for (const el of allElements) {
         try {
           const style = getComputedStyle(el);
           if ((style.overflow === 'auto' || style.overflow === 'scroll' ||
                style.overflowY === 'auto' || style.overflowY === 'scroll')) {
-            if (el.scrollHeight > el.clientHeight + 5 && el.scrollHeight > scrollHeight) {
-              scrollHeight = el.scrollHeight;
-              containerEl = el;
+            if (el.scrollHeight > el.clientHeight + 5) {
+              candidates.push({ tag: el.tagName, class: String(el.className||'').slice(0,40), sh: el.scrollHeight });
+              if (el.scrollHeight > scrollHeight) { scrollHeight = el.scrollHeight; containerEl = el; }
             }
           }
         } catch (_) {}
@@ -751,9 +794,19 @@ async function getPageInfo(tabId) {
       const canScroll = scrollHeight > viewportH + 10;
       const totalFrames = canScroll ? Math.ceil(scrollHeight / viewportH) : 1;
 
-      return { scrollHeight, viewportH, canScroll, totalFrames, hasCustomContainer: !!containerEl };
+      return {
+        scrollHeight, viewportH, canScroll, totalFrames,
+        hasCustomContainer: !!containerEl,
+        containerInfo: containerEl ? { tag: containerEl.tagName, class: String(containerEl.className||'').slice(0,60), sh: containerElement.scrollHeight } : null,
+        topCandidates: candidates.slice(0,5),
+      };
     },
   });
+
+  if (result && result.containerInfo) {
+    send('log', { text: "📦 滚动容器: <" + result.containerInfo.tag + "> | 高度:" + result.containerInfo.sh + "px", type: 'info' });
+  }
+
   return result;
 }
 
