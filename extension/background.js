@@ -1,11 +1,12 @@
-// background.js - MV3 长截图（正确版 vFinal）
-// Chrome API 已核对：tabs / scripting / downloads / runtime
+// background.js - MV3 长截图（v2 轻量稳定版）
+// 优化点：字体渲染锁 + 滚动稳定检测 + 去重 + 节奏控制
 
 let frames = [];
 let running = false;
 let delay = 800;
 let step = 800;
 let ports = [];
+let lastImagePrefix = ''; // 用于去重
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'popup') return;
@@ -25,9 +26,14 @@ async function start(d, s) {
   step = s || 800;
   running = true;
   frames = [];
+  lastImagePrefix = '';
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     send('update', { frameCount: 0 });
+    
+    // 首次截图前，等待字体加载完成
+    await waitForFonts(tab.id);
+    
     await loop(tab);
   } catch (e) {
     send('error', { error: e.message });
@@ -37,43 +43,163 @@ async function start(d, s) {
 }
 
 async function loop(tab) {
-  let stable = 0;
-  while (running) {
-    try {
-      const url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-      frames.push(url);
-      send('update', { frameCount: frames.length });
+  // 先截图第一帧：当前视口（页面顶部）
+  const firstUrl = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+  frames.push(firstUrl);
+  lastImagePrefix = firstUrl.slice(0, 2000);
+  send('update', { frameCount: frames.length });
 
-      const [{ result }] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: (st) => {
-          const a = window.pageYOffset ?? document.documentElement.scrollTop;
-          window.scrollBy(0, st);
-          const b = window.pageYOffset ?? document.documentElement.scrollTop;
-          return {
-            top: b,
-            max: Math.max(document.body.scrollHeight, document.documentElement.scrollHeight) - window.innerHeight,
-            ok: a !== b,
-          };
-        },
-        args: [step],
-      });
+  // 检查页面是否已经可以滚动了（只有一屏的情况）
+  let canScroll = await canPageScroll(tab.id);
+  
+  if (canScroll) {
+    // 循环：滚动 → 稳定 → 截图 → 检查底部
+    while (running) {
+      try {
+        // 1. 滚动页面
+        await scrollDown(tab.id);
 
-      if (!result.ok || result.top >= result.max - 5) {
-        stable++;
-        if (stable >= 2) break;
-      } else {
-        stable = 0;
+        // 2. 等待滚动稳定
+        await waitForScrollStable(tab.id);
+
+        // 3. 额外等待渲染完成
+        await sleep(150);
+
+        // 4. 截图
+        const url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+
+        // 5. 去重检测
+        if (!isDuplicate(url)) {
+          frames.push(url);
+          lastImagePrefix = url.slice(0, 2000);
+          send('update', { frameCount: frames.length });
+        } else {
+          console.log('跳过重复帧');
+          // 连续重复帧说明到底了
+          break;
+        }
+
+        // 6. 判断是否在底部（连续3次确认）
+        if (await checkAtBottom(tab.id)) {
+          // 再多等一帧确认
+          await sleep(200);
+          if (await checkAtBottom(tab.id)) {
+            console.log('已到达底部');
+            break;
+          }
+        }
+      } catch (e) {
+        console.error('loop err:', e);
+        break;
       }
-
-      await sleep(delay);
-    } catch (e) {
-      console.error('loop err:', e);
-      break;
     }
   }
+
   if (frames.length > 0) await save();
   send('complete', { totalFrames: frames.length });
+}
+
+// 滚动页面
+async function scrollDown(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId: tabId },
+    func: (st) => {
+      window.scrollBy(0, st);
+    },
+    args: [step],
+  });
+}
+
+// 等待滚动稳定（使用 requestAnimationFrame 检测 scrollTop 是否不再变化）
+async function waitForScrollStable(tabId) {
+  await chrome.scripting.executeScript({
+    target: { tabId: tabId },
+    func: () => {
+      return new Promise(resolve => {
+        let lastTop = -1;
+        let stableCount = 0;
+        
+        const check = () => {
+          const currentTop = document.documentElement.scrollTop || document.body.scrollTop;
+          
+          if (currentTop === lastTop) {
+            stableCount++;
+          } else {
+            stableCount = 0;
+          }
+          
+          lastTop = currentTop;
+          
+          if (stableCount >= 3) {
+            resolve();
+          } else {
+            requestAnimationFrame(check);
+          }
+        };
+        
+        check();
+      });
+    },
+  });
+}
+
+// 等待字体加载完成
+async function waitForFonts(tabId) {
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: async () => {
+        if (document.fonts && document.fonts.ready) {
+          await document.fonts.ready;
+        }
+      },
+    });
+  } catch (e) {
+    console.warn('字体等待失败，继续截图:', e);
+  }
+}
+
+// 检查页面是否可以滚动（是否有多于一屏的内容）
+async function canPageScroll(tabId) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: tabId },
+    func: () => {
+      const scrollHeight = Math.max(
+        document.body.scrollHeight,
+        document.documentElement.scrollHeight
+      );
+      return window.innerHeight < scrollHeight - 5;
+    },
+  });
+  return result;
+}
+
+// 检查是否到达底部
+async function checkAtBottom(tabId) {
+  const [{ result }] = await chrome.scripting.executeScript({
+    target: { tabId: tabId },
+    func: () => {
+      const el = document.documentElement;
+      const scrollTop = el.scrollTop || document.body.scrollTop;
+      const clientHeight = window.innerHeight;
+      const scrollHeight = Math.max(
+        document.body.scrollHeight,
+        document.documentElement.scrollHeight
+      );
+      
+      return scrollTop + clientHeight >= scrollHeight - 5;
+    },
+  });
+  
+  return result;
+}
+
+// 去重检测（比较 base64 前缀）
+function isDuplicate(imgDataUrl) {
+  if (!lastImagePrefix) return false;
+  
+  const prefix = imgDataUrl.slice(0, 2000);
+  return prefix === lastImagePrefix;
 }
 
 function stop() { running = false; }
