@@ -111,34 +111,41 @@ function handleMsg(msg) {
       if (msg.currentChapter !== undefined) {
         document.getElementById('currentChapter').textContent = msg.currentChapter;
       }
-      // 帧进度
+      // 帧进度（-1 表示翻页中，显示特殊状态）
       if (msg.frameCount !== undefined) {
-        const total = msg.totalFrames ?? '--';
-        document.getElementById('frameCount').textContent =
-          `已捕获: ${msg.frameCount} 帧${total !== '--' ? ` / ${total}` : ''}`;
+        if (msg.frameCount === -1) {
+          document.getElementById('frameCount').textContent = '翻页中...';
+        } else {
+          const total = msg.totalFrames ?? '--';
+          document.getElementById('frameCount').textContent =
+            `已捕获: ${msg.frameCount} 帧${total !== '--' ? ` / ${total}` : ''}`;
+        }
       }
       if (msg.status) {
         document.getElementById('statusText').textContent = msg.status;
       }
-      // 进度条
-      if (msg.totalFrames && msg.frameCount && msg.totalFrames > 0) {
+      // 进度条（只在截图中显示，翻页时不更新）
+      if (msg.totalFrames && msg.frameCount && msg.frameCount > 0 && msg.totalFrames > 0) {
         const pct = Math.min(100, Math.round((msg.frameCount / msg.totalFrames) * 100));
         document.getElementById('progressFill').style.width = `${pct}%`;
       }
       break;
 
     case 'chapterStart':
+      // 新章节开始：重置帧计数和进度条
       addLog(`📖 开始第 ${msg.chapter} 章: ${msg.title || ''}`, 'info');
+      document.getElementById('currentChapter').textContent = msg.chapter;
       document.getElementById('progressFill').style.width = '0%';
       document.getElementById('frameCount').textContent = '已捕获: 0 帧';
       break;
 
     case 'chapterDone':
-      addLog(`✅ 第 ${msg.chapter} 章完成 → ${msg.filename}`, 'success');
+      // 章节完成：显示完成信息，章节号保持不变（还在当前章的收尾阶段）
+      addLog(`✅ 第 ${msg.chapter} 章完成 → ${(msg.filename || '').split('/').pop()}`, 'success');
       if (msg.currentChapter && msg.totalChapters) {
         const pct = Math.min(100, Math.round((msg.currentChapter / msg.totalChapters) * 100));
         document.getElementById('chapterFill').style.width = `${pct}%`;
-        document.getElementById('currentChapter').textContent = msg.currentChapter + 1;
+        document.getElementById('frameCount').textContent = `第${msg.chapter}章已完成 ✓`;
       }
       break;
 

@@ -102,7 +102,11 @@ async function startMultiCapture(params) {
 
       // 如果不是最后一章，翻到下一页
       if (ch < totalChapters && running) {
-        send('update', { status: `等待翻页... (${chapterDelay}ms)` });
+        send('update', {
+          currentChapter: ch,
+          status: `⏳ 第${ch}章已完成，准备翻到第${ch+1}章... (${chapterDelay}ms)`,
+          frameCount: -1,  // 特殊值表示翻页中
+        });
         await sleep(chapterDelay);
 
         const navigated = await navigateNextPage(tab.id);
@@ -112,6 +116,10 @@ async function startMultiCapture(params) {
         }
         send('log', { text: `→ 已翻页，准备第 ${ch + 1} 章...`, type: 'info' });
         // 等待新页面加载
+        send('update', {
+          currentChapter: ch + 1,
+          status: `⏳ 等待第${ch+1}章页面加载...`,
+        });
         await sleep(Math.max(chapterDelay, 1000));
       }
     }
