@@ -344,7 +344,8 @@ async function captureChapter(tab, pageInfo, chapterNum) {
   send('log', { text: '📏 步长:' + stepSize + 'px | viewport:' + pageInfo.viewportH + 'px', type: 'info' });
 
   const loopCount = Math.min(pageInfo.totalFrames + 2, MAX_FRAMES);
-  let prevScrollTop = -1;
+  let noScrollCount = 0; // 连续多少次滚动没变化
+  const MAX_NO_SCROLL = 3; // 连续3次没滚动则停止
 
   for (let i = 0; i < loopCount && running; i++) {
     try {
@@ -355,14 +356,22 @@ async function captureChapter(tab, pageInfo, chapterNum) {
         break;
       }
 
-      // 安全滚动
+      // 安全滚动（带日志）
       await safeScroll(tab.id, stepSize);
 
-      // 检测是否到底（scrollTop 不再变化）
+      // 检测是否到底（scrollTop 连续多次不变）
       const scrollTop = await getScrollTop(tab.id);
-      if (prevScrollTop >= 0 && Math.abs(scrollTop - prevScrollTop) < 3) {
-        send('log', { text: '⛔ 滚动停止(scrollTop=' + scrollTop + ')，到底了', type: 'info' });
-        break;
+      if (scrollTop <= 0) {
+        // scrollTop=0 可能还没开始滚，或者已经到顶
+        // 不判断，继续
+      } else if (prevScrollTop >= 0 && scrollTop === prevScrollTop) {
+        noScrollCount++;
+        if (noScrollCount >= MAX_NO_SCROLL) {
+          send('log', { text: '⛔ 滚动停止(scrollTop=' + scrollTop + ' 连续' + MAX_NO_SCROLL + '次不变)，到底了', type: 'info' });
+          break;
+        }
+      } else {
+        noScrollCount = 0;
       }
       prevScrollTop = scrollTop;
 
@@ -409,30 +418,83 @@ async function captureChapter(tab, pageInfo, chapterNum) {
 
 // ============================================================
 // 安全滚动（容错，不抛异常）
+// 增加调试日志：显示找到了哪个容器、滚动是否生效
 // ============================================================
 async function safeScroll(tabId, stepSize) {
   try {
-    await chrome.scripting.executeScript({
+    const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tabId },
       func: (step) => {
-        // 找滚动容器（优先 reader-content， fallback 到 scrollingElement）
-        const container =
-          document.querySelector('.reader-content') ||
-          document.querySelector('.content') ||
-          document.querySelector('[class*="reader"]') ||
-          document.scrollingElement ||
-          document.documentElement;
+        // 找滚动容器（按优先级）
+        const candidates = [
+          document.querySelector('.reader-content'),
+          document.querySelector('.content'),
+          document.querySelector('[class*="reader"]'),
+          document.querySelector('[class*="muye"]'),
+          document.scrollingElement,
+          document.documentElement,
+          document.body,
+        ];
 
-        if (container) {
-          // 用 scrollBy 而不是 scrollTop（更自然，不触发 SPA 路由）
-          container.scrollBy(0, step);
+        let container = null;
+        let containerName = '';
+        for (const c of candidates) {
+          if (!c) continue;
+          // 检查这个元素是否真的可滚动
+          const style = getComputedStyle(c);
+          const canH = style.overflow === 'auto' || style.overflow === 'scroll' ||
+                       style.overflowY === 'auto' || style.overflowY === 'scroll';
+          const name = c === document.scrollingElement ? 'scrollingElement' :
+                        c === document.documentElement ? 'documentElement' :
+                        c === document.body ? 'body' :
+                        (c.className || c.tagName || 'unknown');
+          // 优先用可 overflow 的容器；都没有就用工件根元素
+          if (canH || !container) {
+            container = c;
+            containerName = name;
+          }
+          if (canH) break; // 找到明确可滚动的容器就停
         }
+
+        if (!container) {
+          return { ok: false, msg: 'no_container' };
+        }
+
+        const beforeTop = container.scrollTop || 0;
+        container.scrollBy(0, step);
+        // 如果 scrollBy 不生效（某些元素需要设 scrollTop）
+        const afterTop = container.scrollTop || 0;
+        if (Math.abs(afterTop - beforeTop) < 2) {
+          // 备用：直接设 scrollTop
+          container.scrollTop = beforeTop + step;
+        }
+
+        const finalTop = container.scrollTop || 0;
+        return {
+          ok: true,
+          container: String(containerName).slice(0, 40),
+          before: beforeTop,
+          after: finalTop,
+          delta: finalTop - beforeTop,
+        };
       },
       args: [stepSize],
     });
-  } catch (_) {}
 
-  // 等滚动稳定
+    if (result) {
+      if (result.ok) {
+        send('log', { text: `📜 滚动: ${result.container} before=${result.before} after=${result.after} delta=${result.delta}`, type: 'info' });
+        if (Math.abs(result.delta) < 3) {
+          send('log', { text: `⚠️ 滚动似乎没生效(delta=${result.delta})，尝试 window.scrollBy`, type: 'warn' });
+        }
+      } else {
+        send('log', { text: `⚠️ 未找到滚动容器`, type: 'warn' });
+      }
+    }
+  } catch (e) {
+    send('log', { text: `⚠️ safeScroll 出错: ${e.message}`, type: 'warn' });
+  }
+
   await sleep(delay);
 }
 
@@ -478,6 +540,7 @@ function isDupFrame(a, b) {
 
 // ============================================================
 // 获取页面信息（完全容错，不抛异常）
+// 增加日志：显示检测到的 scrollHeight 和容器
 // ============================================================
 async function getPageInfo(tabId) {
   try {
@@ -486,26 +549,39 @@ async function getPageInfo(tabId) {
       func: () => {
         const viewportH = window.innerHeight;
 
-        // 安全获取 scrollHeight（所有都可能为 null）
+        // 安全获取各容器 scrollHeight
         let scrollHeight = viewportH;
+        let containerName = 'window';
 
         const body = document.body;
         const docEl = document.documentElement;
         if (body && typeof body.scrollHeight === 'number') {
-          scrollHeight = Math.max(scrollHeight, body.scrollHeight);
+          if (body.scrollHeight > scrollHeight) {
+            scrollHeight = body.scrollHeight;
+            containerName = 'body';
+          }
         }
         if (docEl && typeof docEl.scrollHeight === 'number') {
-          scrollHeight = Math.max(scrollHeight, docEl.scrollHeight);
+          if (docEl.scrollHeight > scrollHeight) {
+            scrollHeight = docEl.scrollHeight;
+            containerName = 'documentElement';
+          }
         }
 
-        // 找阅读容器
-        const container =
-          document.querySelector('.reader-content') ||
-          document.querySelector('.content') ||
-          document.querySelector('[class*="reader"]');
-
-        if (container && typeof container.scrollHeight === 'number') {
-          scrollHeight = Math.max(scrollHeight, container.scrollHeight);
+        // 找有 overflow 的容器
+        const allEls = document.querySelectorAll('*');
+        for (const el of allEls) {
+          try {
+            const style = getComputedStyle(el);
+            const canH = style.overflow === 'auto' || style.overflow === 'scroll' ||
+                         style.overflowY === 'auto' || style.overflowY === 'scroll';
+            if (canH && el.scrollHeight > el.clientHeight + 5) {
+              if (el.scrollHeight > scrollHeight) {
+                scrollHeight = el.scrollHeight;
+                containerName = (el.className || el.tagName || 'div').slice(0, 40);
+              }
+            }
+          } catch (_) {}
         }
 
         const canScroll = scrollHeight > viewportH + 5;
@@ -516,13 +592,17 @@ async function getPageInfo(tabId) {
           viewportH,
           canScroll,
           totalFrames,
+          containerName,
         };
       },
     });
+
+    if (result) {
+      send('log', { text: `📐 页面信息: 容器=${result.containerName} 高度=${result.scrollHeight}px viewport=${result.viewportH}px canScroll=${result.canScroll} 预计帧=${result.totalFrames}`, type: 'info' });
+    }
     return result;
   } catch (e) {
     send('log', { text: '⚠️ getPageInfo 出错: ' + e.message, type: 'warn' });
-    // 返回默认值（至少能截 1 帧）
     return {
       scrollHeight: 1000,
       viewportH: 800,
