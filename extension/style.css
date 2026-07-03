@@ -56,33 +56,6 @@ body {
   margin-bottom: 10px;
 }
 
-/* ===== Mode Switch ===== */
-.mode-switch {
-  display: flex;
-  border: 1.5px solid #e0e0e0;
-  border-radius: 8px;
-  overflow: hidden;
-}
-.mode-btn {
-  flex: 1;
-  padding: 9px 0;
-  font-size: 13px;
-  font-weight: 500;
-  border: none;
-  background: transparent;
-  color: #666;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-.mode-btn.active {
-  background: #ff6a00;
-  color: #fff;
-  font-weight: 600;
-}
-.mode-btn:hover:not(.active) {
-  background: #f5f5f5;
-}
-
 /* ===== Multi Settings ===== */
 .multi-settings.hidden,
 .page-info.hidden,
