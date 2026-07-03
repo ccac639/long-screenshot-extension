@@ -14,6 +14,17 @@ let novelName = '';           // 小说名称
 let totalChapters = 1;        // 总章节数
 let currentChapterNum = 1;    // 当前章节号
 
+// ============================================================
+// Patch 1: 章节锁（彻底修复跳章）
+// ============================================================
+let lastChapterKey = '';
+let isSwitchingChapter = false;
+
+// ============================================================
+// Patch 2: 帧去重
+// ============================================================
+let lastFrame = '';
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'popup') return;
   ports.push(port);
@@ -112,77 +123,22 @@ async function startMultiCapture(params) {
       if (ch < totalChapters && running) {
         send('update', {
           currentChapter: ch,
-          status: `⏳ 第${ch}章已完成，准备翻到第${ch+1}章... (${chapterDelay}ms)`,
+          status: `⏳ 第${ch}章已完成，准备翻到第${ch+1}章...`,
           frameCount: -1,
         });
-        await sleep(chapterDelay);
 
-        // 记录翻页前的 URL 和章节标题
-        const urlBefore = await getCurrentUrl(tab.id);
-        const titleBefore = await getPageTitle(tab.id);
-        send('log', { text: `📍 [翻页前] URL: ${urlBefore} | 标题: ${titleBefore}`, type: 'info' });
-
-        // 执行翻页
-        const navigated = await navigateNextPage(tab.id);
+        // Patch 1: 使用 safeNextChapter（带章节锁）
+        const navigated = await safeNextChapter(tab.id);
         if (!navigated) {
           send('log', { text: `⚠️ 无法翻到下一页（第${ch}章后停止）`, type: 'error' });
           break;
         }
 
-        // 翻页后等待页面加载 + 验证
-        send('log', { text: `→ 已执行翻页操作，等待页面加载...`, type: 'info' });
+        // 等待页面完全渲染
+        await sleep(chapterDelay);
 
-        // 等待页面真正加载完成（最多等 5 秒）
-        let pageLoaded = false;
-        for (let waitCount = 0; waitCount < 10; waitCount++) {
-          await sleep(500);
-          const titleNow = await getPageTitle(tab.id);
-          const urlNow = await getCurrentUrl(tab.id);
-
-          // 检测页面是否已变化（说明翻页成功了）
-          if (urlNow !== urlBefore || titleNow !== titleBefore) {
-            pageLoaded = true;
-            send('log', { text: `✅ 翻页成功！新标题: ${titleNow}`, type: 'success' });
-            break;
-          }
-
-          if (waitCount === 5) {
-            send('log', { text: `⏳ 翻页后等待中... (${waitCount * 500}ms)`, type: 'info' });
-          }
-        }
-
-        if (!pageLoaded) {
-          send('log', { text: `⚠️ 翻页后页面未及时变化，强制继续...`, type: 'warn' });
-        }
-
-        // 再额外等 1 秒让页面完全渲染
-        await sleep(1000);
-
-        const urlAfter = await getCurrentUrl(tab.id);
         const titleAfter = await getPageTitle(tab.id);
-        send('log', { text: `📍 [翻页后-最终] URL: ${urlAfter} | 标题: ${titleAfter}`, type: 'info' });
-
-        // 检测是否真的翻页了
-        if (urlBefore === urlAfter && titleBefore === titleAfter) {
-          send('log', { text: `⚠️ 警告：翻页后页面未变化！可能翻页失败`, type: 'error' });
-          // 再尝试一次
-          send('log', { text: `🔄 重试翻页...`, type: 'info' });
-          await sleep(500);
-          await navigateNextPage(tab.id);
-          await sleep(1500);
-        }
-
-        // 检测章节号是否跳变（从标题中提取数字）
-        const chNumBefore = extractChapterNumber(titleBefore);
-        const chNumAfter = extractChapterNumber(titleAfter);
-        if (chNumBefore > 0 && chNumAfter > 0) {
-          const jump = chNumAfter - chNumBefore;
-          if (jump > 1) {
-            send('log', { text: `⚠️ 检测到跳章！从第${chNumBefore}章跳到第${chNumAfter}章（跳过${jump-1}章）`, type: 'error' });
-          } else if (jump === 0) {
-            send('log', { text: `⚠️ 检测到重复！翻页前后都是第${chNumBefore}章`, type: 'warn' });
-          }
-        }
+        send('log', { text: `📍 翻页后标题: ${titleAfter}`, type: 'info' });
 
         send('update', {
           currentChapter: ch + 1,
@@ -205,21 +161,24 @@ async function startMultiCapture(params) {
 }
 
 /**
- * 截取单个完整章节
- * 返回捕获的帧数组（用于拼接）
+ * ============================================================
+ * Patch 2+4: 截取单个完整章节（带帧去重 + 跳章检测）
+ * ============================================================
  */
 async function captureChapter(tab, pageInfo, chapterNum) {
   let chapterFrames = [];
   let duplicateCount = 0;
   const MAX_DUP = 3; // 连续重复N帧则停止
 
-  // 章节锁（只用URL）
-  const chapterSigUrl = await getCurrentUrl(tab.id);
-  send('log', { text: "🔒 章节锁: " + chapterSigUrl.slice(0,50), type: 'info' });
+  // 章节锁（用章节指纹）
+  const chapterKeyBefore = await getChapterKeyFromTab(tab.id);
+  lastChapterKey = chapterKeyBefore;
+  send('log', { text: "🔒 章节锁: " + chapterKeyBefore.slice(0, 50), type: 'info' });
 
   // 第1帧
   let url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
   chapterFrames.push(url);
+  lastFrame = url; // Patch 2: 记录上一帧
   send('update', { frameCount: 1, status: "第" + chapterNum + "章: 1/" + pageInfo.totalFrames + "帧", totalFrames: pageInfo.totalFrames });
 
   if (!pageInfo.canScroll) return chapterFrames;
@@ -231,31 +190,37 @@ async function captureChapter(tab, pageInfo, chapterNum) {
   const loopCount = Math.min(pageInfo.totalFrames + 2, MAX_FRAMES);
   for (let i = 0; i < loopCount && running; i++) {
     try {
-      const beforeST = await getScrollTop(tab.id);
-      await scrollByViewport(tab.id, stepSize);
-      await sleep(delay);
+      // Patch 4: 滚动前获取章节指纹
+      const keyBeforeScroll = await getChapterKeyFromTab(tab.id);
 
-      // 验证滚动
+      // Patch 3: 使用 scrollStable（等稳定）
+      await scrollStable(tab.id, stepSize);
+
+      // Patch 4: 滚动后检测是否跳章
+      const keyAfterScroll = await getChapterKeyFromTab(tab.id);
+      if (keyBeforeScroll && keyAfterScroll && keyBeforeScroll !== keyAfterScroll) {
+        send('log', { text: "⚠️ 检测到跳章（滚动触发），停止截取", type: 'error' });
+        break;
+      }
+
+      // 验证滚动（检测是否到底）
       const afterST = await getScrollTop(tab.id);
+      const beforeST = i > 0 ? (await getScrollTop(tab.id)) : 0;
       const delta = afterST - beforeST;
 
-      if (Math.abs(delta) < 5) {
+      if (Math.abs(delta) < 5 && i > 0) {
         send('log', { text: "⛔ 滚动停止(delta=" + delta + "px)，到底了", type: 'info' });
         break;
       }
 
-      // URL 锁检测
-      if (await getCurrentUrl(tab.id) !== chapterSigUrl) {
-        send('log', { text: "⚠️ 跳章！URL变化", type: 'error' });
-        break;
-      }
-
+      // 捕获当前帧
       url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-      
-      // 帧去重
+
+      // Patch 2: 帧去重（用 isDupFrame 比较 base64 内容）
       if (chapterFrames.length > 0) {
-        if (isDupFrame(chapterFrames[chapterFrames.length-1], url)) {
+        if (isDupFrame(chapterFrames[chapterFrames.length - 1], url)) {
           duplicateCount++;
+          send('log', { text: "⚠️ 检测到重复帧(" + duplicateCount + "/" + MAX_DUP + ")", type: 'warn' });
           if (duplicateCount >= MAX_DUP) {
             send('log', { text: "⛔ 连续" + MAX_DUP + "帧重复，停止", type: 'warn' });
             break;
@@ -264,11 +229,13 @@ async function captureChapter(tab, pageInfo, chapterNum) {
         }
       }
       duplicateCount = 0;
+      lastFrame = url;
+
       chapterFrames.push(url);
 
       send('update', {
         frameCount: chapterFrames.length,
-        status: "第" + chapterNum + "章: " + chapterFrames.length + "/" + pageInfo.totalFrames + "帧 (delta:" + delta + "px)",
+        status: "第" + chapterNum + "章: " + chapterFrames.length + "/" + pageInfo.totalFrames + "帧",
         totalFrames: pageInfo.totalFrames,
       });
     } catch(e) {
@@ -330,8 +297,117 @@ async function saveChapter(chapterFrames, filename, chapterNum) {
 }
 
 /**
+ * ============================================================
+ * Patch 1: 获取章节唯一标识（用于章节锁）
+ * 用 .muye-reader-title + .reader-content 前200字作为章节指纹
+ * ============================================================
+ */
+async function getChapterKeyFromTab(tabId) {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: () => {
+        const title = document.querySelector('.muye-reader-title')?.innerText || '';
+        const content = document.querySelector('.reader-content')?.innerText || '';
+        return title + '|' + content.slice(0, 200);
+      },
+    });
+    return result || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+/**
+ * ============================================================
+ * Patch 1: 安全翻章（带章节锁，彻底修复跳章）
+ * 点击下一章后，循环等待章节真正变化才返回
+ * ============================================================
+ */
+async function safeNextChapter(tabId) {
+  if (isSwitchingChapter) return false;
+  isSwitchingChapter = true;
+
+  // 记录翻章前的章节指纹
+  const beforeKey = await getChapterKeyFromTab(tabId);
+  send('log', { text: `🔒 翻章前指纹: ${beforeKey.slice(0, 40)}`, type: 'info' });
+
+  // 执行点击下一章按钮
+  let clicked = false;
+  try {
+    const [{ result: clickResult }] = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: () => {
+        const allButtons = document.querySelectorAll('button, a, [role="button"]');
+        let foundBtn = null;
+
+        // 精确匹配"下一章"
+        for (const el of allButtons) {
+          const text = (el.textContent || '').trim();
+          if (text === '下一章' && !text.includes('上一')) {
+            foundBtn = el;
+            break;
+          }
+          // 匹配 span 内的文字
+          const spans = el.querySelectorAll('span');
+          for (const span of spans) {
+            if ((span.textContent || '').trim() === '下一章') {
+              foundBtn = el;
+              break;
+            }
+          }
+          if (foundBtn) break;
+        }
+
+        if (foundBtn) {
+          foundBtn.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+          foundBtn.click();
+          foundBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+          return { success: true, text: (foundBtn.textContent || '').trim().slice(0, 30) };
+        }
+        return { success: false };
+      },
+    });
+
+    if (clickResult && clickResult.success) {
+      send('log', { text: `🖱️ 已点击按钮: ${clickResult.text}`, type: 'success' });
+      clicked = true;
+    }
+  } catch (e) {
+    send('log', { text: `⚠️ 点击按钮失败: ${e.message}`, type: 'warn' });
+  }
+
+  if (!clicked) {
+    isSwitchingChapter = false;
+    return false;
+  }
+
+  // 等待章节真的变化（防误跳 / 防连跳）
+  let chapterChanged = false;
+  for (let i = 0; i < 20; i++) {
+    await sleep(200);
+    const nowKey = await getChapterKeyFromTab(tabId);
+
+    if (nowKey && nowKey !== beforeKey) {
+      lastChapterKey = nowKey;
+      chapterChanged = true;
+      send('log', { text: `✅ 章节已变化: ${nowKey.slice(0, 40)}`, type: 'success' });
+      break;
+    }
+  }
+
+  if (!chapterChanged) {
+    send('log', { text: `⚠️ 翻章后章节未变化（可能已到最后一章）`, type: 'warn' });
+  }
+
+  isSwitchingChapter = false;
+  return chapterChanged;
+}
+
+/**
  * 翻到下一页（优先点击"下一章"按钮）
  * 用户网站按钮：<button class="byte-btn ... muye-button"><span>下一章</span></button>
+ * ⚠️ 已废弃，请使用 safeNextChapter()
  */
 async function navigateNextPage(tabId) {
   // 方法1（优先）：尝试查找并点击"下一章"按钮
@@ -810,30 +886,58 @@ async function getPageInfo(tabId) {
   return result;
 }
 
-async function scrollByViewport(tabId, amount) {
+/**
+ * ============================================================
+ * Patch 3: scroll 必须"等稳定"
+ * 滚动后等待 font ready + paint 稳定
+ * ============================================================
+ */
+async function scrollStable(tabId, stepSize) {
+  // 先执行滚动
   await chrome.scripting.executeScript({
     target: { tabId: tabId },
-    func: (stepSize) => {
+    func: (step) => {
       // 优先锁定阅读容器（防止触发 SPA 路由跳转）
       const container =
         document.querySelector('.reader-content') ||
         document.querySelector('.content') ||
         document.querySelector('[class*="reader"]') ||
-        document.querySelector('[class*="content"]') ||
+        document.querySelector('[class*="muye"]') ||
         document.scrollingElement;
 
-      if (container && container !== document.scrollingElement) {
-        // 滚动容器
-        container.scrollBy(0, stepSize);
+      if (container) {
+        container.scrollBy(0, step);
       } else {
-        // 备用：滚动 window
-        window.scrollBy(0, stepSize);
-        if (document.documentElement) document.documentElement.scrollTop += stepSize;
-        if (document.body) document.body.scrollTop += stepSize;
+        window.scrollBy(0, step);
       }
     },
-    args: [amount],
+    args: [stepSize],
   });
+
+  // 等待 120ms 让滚动生效
+  await sleep(120);
+
+  // 等 font ready（防止字体切换导致内容高度变化）
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: async () => {
+        if (document.fonts && document.fonts.ready) {
+          await document.fonts.ready;
+        }
+      },
+    });
+  } catch (_) {}
+
+  // 再等 80ms 让 paint 稳定
+  await sleep(80);
+}
+
+/**
+ * @deprecated 请使用 scrollStable()
+ */
+async function scrollByViewport(tabId, amount) {
+  await scrollStable(tabId, amount);
 }
 
 /**
