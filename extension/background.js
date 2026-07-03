@@ -128,14 +128,31 @@ async function startMultiCapture(params) {
         // 翻页后等待页面加载 + 验证
         send('log', { text: `→ 已执行翻页操作，等待页面加载...`, type: 'info' });
 
-        // 分阶段等待：先短等，检查是否开始加载
-        await sleep(800);
-        let urlAfter1 = await getCurrentUrl(tab.id);
-        let titleAfter1 = await getPageTitle(tab.id);
-        send('log', { text: `📍 [翻页后-800ms] URL: ${urlAfter1} | 标题: ${titleAfter1}`, type: 'info' });
+        // 等待页面真正加载完成（最多等 5 秒）
+        let pageLoaded = false;
+        for (let waitCount = 0; waitCount < 10; waitCount++) {
+          await sleep(500);
+          const titleNow = await getPageTitle(tab.id);
+          const urlNow = await getCurrentUrl(tab.id);
 
-        // 再等一段时间让页面完全加载
-        await sleep(Math.max(chapterDelay - 800, 1000));
+          // 检测页面是否已变化（说明翻页成功了）
+          if (urlNow !== urlBefore || titleNow !== titleBefore) {
+            pageLoaded = true;
+            send('log', { text: `✅ 翻页成功！新标题: ${titleNow}`, type: 'success' });
+            break;
+          }
+
+          if (waitCount === 5) {
+            send('log', { text: `⏳ 翻页后等待中... (${waitCount * 500}ms)`, type: 'info' });
+          }
+        }
+
+        if (!pageLoaded) {
+          send('log', { text: `⚠️ 翻页后页面未及时变化，强制继续...`, type: 'warn' });
+        }
+
+        // 再额外等 1 秒让页面完全渲染
+        await sleep(1000);
 
         const urlAfter = await getCurrentUrl(tab.id);
         const titleAfter = await getPageTitle(tab.id);
@@ -282,15 +299,16 @@ async function navigateNextPage(tabId) {
         // 第一遍：精确匹配"下一章"文字
         for (const el of allButtons) {
           const text = (el.textContent || '').trim();
-          const html = el.innerHTML || '';
 
-          // 精确匹配"下一章"
-          if (text === '下一章' || text.includes('下一章')) {
-            // 排除"上一章"（有些网站两个按钮挨着）
-            if (!text.includes('上一章') || text === '下一章') {
-              foundBtn = el;
-              break;
-            }
+          // 只匹配精确的"下一章"，排除"上一章"
+          if (text === '下一章' && !text.includes('上一')) {
+            foundBtn = el;
+            break;
+          }
+          // 模糊匹配"下一章"（允许前后有空格）
+          if (text.includes('下一章') && !text.includes('上一')) {
+            foundBtn = el;
+            break;
           }
 
           // 匹配 span 内的文字（用户网站结构）
