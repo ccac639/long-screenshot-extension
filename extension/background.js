@@ -1,18 +1,31 @@
-// background.js - MV3 长截图（v3.0 自动测高版）
-// 核心逻辑：自动获取页面总高度 → 计算帧数 → 固定次数循环 → 滚动到底
+// background.js - MV3 长截图采集 v4.0（多章版）
+// 功能：单章截图 / 多章采集 / 自动翻页 / 文件夹保存
 
 let frames = [];
 let running = false;
 let delay = 800;
 let ports = [];
-const MAX_FRAMES = 200; // 安全上限
+const MAX_FRAMES = 200;
+
+// 多章模式状态
+let multiMode = false;       // 是否多章模式
+let novelName = '';          // 小说名称
+let totalChapters = 1;       // 总章节数
+let currentChapterNum = 1;   // 当前章节号
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'popup') return;
   ports.push(port);
   port.onMessage.addListener((msg) => {
-    if (msg.action === 'start') start(msg.scrollDelay);
-    if (msg.action === 'stop')  stop();
+    if (msg.action === 'start') {
+      // 判断模式
+      if (msg.mode === 'multi') {
+        startMultiCapture(msg);
+      } else {
+        startSingle(msg);
+      }
+    }
+    if (msg.action === 'stop') stop();
   });
   port.onDisconnect.addListener(() => {
     const i = ports.indexOf(port);
@@ -20,33 +33,31 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-async function start(d) {
-  delay = d || 800;
+// ============================================================
+// 单章模式（原有逻辑）
+// ============================================================
+
+async function startSingle(params) {
+  delay = params.scrollDelay || 800;
   running = true;
   frames = [];
+  multiMode = false;
+
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
     send('update', { frameCount: 0, status: '正在测量页面高度...' });
-
-    // 等待字体加载完成
     await waitForFonts(tab.id);
 
-    // 获取页面信息：总高度、视口高度、自动计算帧数
     const pageInfo = await getPageInfo(tab.id);
-    if (!pageInfo.canScroll) {
-      send('update', { frameCount: 0, status: '单屏页面，直接截图' });
-    } else {
-      send('update', {
-        frameCount: 0,
-        status: `页面总高 ${pageInfo.scrollHeight}px，视口 ${pageInfo.viewportH}px，预计 ${pageInfo.totalFrames} 帧`,
-        totalFrames: pageInfo.totalFrames,
-        scrollHeight: pageInfo.scrollHeight,
-      });
-    }
+    send('update', {
+      frameCount: 0,
+      status: `页面总高 ${pageInfo.scrollHeight}px，预计 ${pageInfo.totalFrames} 帧`,
+      totalFrames: pageInfo.totalFrames,
+      scrollHeight: pageInfo.scrollHeight,
+    });
 
-    await loop(tab, pageInfo);
-
+    await loopSingle(tab, pageInfo);
   } catch (e) {
     send('error', { error: e.message });
   } finally {
@@ -54,8 +65,7 @@ async function start(d) {
   }
 }
 
-async function loop(tab, pageInfo) {
-  // 第1帧：当前视口（顶部）
+async function loopSingle(tab, pageInfo) {
   let url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
   frames.push(url);
   send('update', {
@@ -64,63 +74,358 @@ async function loop(tab, pageInfo) {
     totalFrames: pageInfo.totalFrames,
   });
 
-  // 如果只有一屏，直接保存
   if (!pageInfo.canScroll) {
-    console.log('[loop] 单屏页面，只保存1帧');
-    if (frames.length > 0) await save();
-    send('complete', { totalFrames: frames.length });
+    if (frames.length > 0) await saveSingle('long_screenshot.png');
+    send('complete', { totalFrames: frames.length, mode: 'single' });
     return;
   }
 
-  // 固定循环：totalFrames-1 次（第1帧已截）
   const loopCount = Math.min(pageInfo.totalFrames - 1, MAX_FRAMES - 1);
-
   for (let i = 0; i < loopCount && running; i++) {
     try {
-      // 滚动一整个视口高度
       await scrollByViewport(tab.id, pageInfo.viewportH);
-
-      // 等待渲染稳定
       await sleep(delay);
-
-      // 截图
       url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
       frames.push(url);
-
       send('update', {
         frameCount: frames.length,
         status: `已截 ${frames.length}/${pageInfo.totalFrames} 帧 (${Math.round(frames.length / pageInfo.totalFrames * 100)}%)`,
         totalFrames: pageInfo.totalFrames,
       });
-
-      console.log(`[loop] 第 ${i + 2}/${pageInfo.totalFrames} 帧 ✓`);
-
     } catch (e) {
-      console.error('[loop] error:', e);
+      console.error('[loopSingle] error:', e);
       break;
     }
   }
 
-  console.log(`[loop] 完成！共截取 ${frames.length} 帧`);
-  if (frames.length > 0) await save();
-  send('complete', { totalFrames: frames.length });
+  if (frames.length > 0) await saveSingle('long_screenshot.png');
+  send('complete', { totalFrames: frames.length, mode: 'single' });
+}
+
+async function saveSingle(filename) {
+  try {
+    const url = await stitch(frames);
+    await new Promise((ok, fail) => {
+      chrome.downloads.download(
+        { url: url, filename: filename, saveAs: true },
+        (id) => {
+          if (chrome.runtime.lastError) fail(chrome.runtime.lastError);
+          else ok(id);
+        }
+      );
+    });
+  } catch (e) {
+    console.error('[saveSingle] err:', e);
+    send('error', { error: e.message });
+  }
+}
+
+// ============================================================
+// 多章采集模式（新功能）
+// ============================================================
+
+async function startMultiCapture(params) {
+  delay = params.scrollDelay || 800;
+  const chapterDelay = params.chapterDelay || 1500;
+  novelName = params.novelName || '未命名小说';
+  totalChapters = params.chapterCount || 10;
+  currentChapterNum = 1;
+  running = true;
+  multiMode = true;
+
+  send('log', { text: `📚 开始多章采集 | 小说: ${novelName} | 目标: ${totalChapters >= 9999 ? '免费章节' : totalChapters + '章'}`, type: 'info' });
+  send('log', { text: `⚙️ 滚动延迟: ${delay}ms | 章节间隔: ${chapterDelay}ms`, type: 'info' });
+
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    send('update', { totalChapters: totalChapters >= 9999 ? '?' : totalChapters });
+
+    // 获取当前页标题作为第1章标题
+    const pageTitle = await getPageTitle(tab.id);
+
+    // 主循环：逐章采集
+    for (let ch = 1; ch <= totalChapters && running; ch++) {
+      currentChapterNum = ch;
+      send('chapterStart', { chapter: ch, title: pageTitle || `第${ch}章` });
+      send('update', { currentChapter: ch });
+
+      try {
+        // 等待字体加载 + 页面稳定
+        await waitForFonts(tab.id);
+        await sleep(300);
+
+        // 测量当前章
+        const pageInfo = await getPageInfo(tab.id);
+        send('update', {
+          frameCount: 0,
+          status: `第${ch}章 | 高度:${pageInfo.scrollHeight}px 预计:${pageInfo.totalFrames}帧`,
+          totalFrames: pageInfo.totalFrames,
+          scrollHeight: pageInfo.scrollHeight,
+        });
+
+        // 截取当前章
+        const capturedFrames = await captureChapter(tab, pageInfo, ch);
+
+        // 保存当前章（自动创建小说文件夹）
+        if (capturedFrames.length > 0) {
+          const safeName = sanitizeFilename(novelName);
+          const chTitle = await getPageTitle(tab.id) || `${ch}`;
+          const filename = `${safeName}/第${String(ch).padStart(3, '0')}章_${chTitle}.png`;
+          await saveChapter(capturedFrames, filename, ch);
+
+          send('chapterDone', {
+            chapter: ch,
+            filename: filename,
+            currentChapter: ch,
+            totalChapters: totalChapters >= 9999 ? '?' : totalChapters,
+          });
+        }
+
+      } catch (chErr) {
+        send('log', { text: `❌ 第${ch}章出错: ${chErr.message}`, type: 'error' });
+        // 继续下一章，不中断整体
+      }
+
+      // 如果不是最后一章，翻到下一页
+      if (ch < totalChapters && running) {
+        send('update', { status: `等待翻页... (${chapterDelay}ms)` });
+        await sleep(chapterDelay);
+
+        const navigated = await navigateNextPage(tab.id);
+        if (!navigated) {
+          send('log', { text: `⚠️ 无法翻到下一页（第${ch}章后停止）`, type: 'error' });
+          break;
+        }
+        send('log', { text: `→ 已翻页，准备第 ${ch + 1} 章...`, type: 'info' });
+        // 等待新页面加载
+        await sleep(Math.max(chapterDelay, 1000));
+      }
+    }
+
+    send('complete', {
+      mode: 'multi',
+      totalChapters: currentChapterNum,
+      totalFrames: frames.reduce((sum, f) => sum + f.length, 0),
+    });
+
+  } catch (e) {
+    send('error', { error: e.message });
+  } finally {
+    running = false;
+    multiMode = false;
+  }
 }
 
 /**
- * 获取页面信息：总高度、视口高度、是否可滚动、预计帧数
+ * 截取单个完整章节
+ * 返回捕获的帧数组（用于拼接）
  */
+async function captureChapter(tab, pageInfo, chapterNum) {
+  let chapterFrames = [];
+
+  // 第1帧：当前视口顶部
+  let url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+  chapterFrames.push(url);
+
+  send('update', {
+    frameCount: 1,
+    status: `第${chapterNum}章: 1/${pageInfo.totalFrames}帧`,
+    totalFrames: pageInfo.totalFrames,
+  });
+
+  if (!pageInfo.canScroll) {
+    return chapterFrames;
+  }
+
+  const loopCount = Math.min(pageInfo.totalFrames - 1, MAX_FRAMES - 1);
+  for (let i = 0; i < loopCount && running; i++) {
+    try {
+      await scrollByViewport(tab.id, pageInfo.viewportH);
+      await sleep(delay);
+
+      url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
+      chapterFrames.push(url);
+
+      send('update', {
+        frameCount: chapterFrames.length,
+        status: `第${chapterNum}章: ${chapterFrames.length}/${pageInfo.totalFrames}帧 (${Math.round(chapterFrames.length / pageInfo.totalFrames * 100)}%)`,
+        totalFrames: pageInfo.totalFrames,
+      });
+    } catch (e) {
+      console.error(`[captureChapter-${chapterNum}] error:`, e);
+      break;
+    }
+  }
+
+  return chapterFrames;
+}
+
+/**
+ * 保存单章图片（带文件夹路径）
+ */
+async function saveChapter(chapterFrames, filename, chapterNum) {
+  try {
+    const url = await stitch(chapterFrames);
+
+    // chrome.downloads.download 会根据路径中的 "/" 自动创建文件夹
+    await new Promise((ok, fail) => {
+      chrome.downloads.download(
+        { url: url, filename: filename, saveAs: false },
+        (id) => {
+          if (chrome.runtime.lastError) fail(chrome.runtime.lastError);
+          else ok(id);
+        }
+      );
+    });
+
+    console.log(`[saveChapter] 第${chapterNum}章已保存: ${filename}`);
+  } catch (e) {
+    console.error(`[saveChapter-${chapterNum}] err:`, e);
+    throw e;
+  }
+}
+
+/**
+ * 翻到下一页（模拟键盘方向键→）
+ * 大多数小说站的"下一章"按钮可以通过键盘 → 触发
+ */
+async function navigateNextPage(tabId) {
+  try {
+    // 方法1：模拟键盘 ArrowRight 键
+    const [{ result: keyResult }] = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: () => {
+        // 创建并分发键盘事件
+        const eventInit = {
+          key: 'ArrowRight',
+          code: 'ArrowRight',
+          keyCode: 39,
+          which: 39,
+          bubbles: true,
+          cancelable: true,
+        };
+
+        document.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+        document.dispatchEvent(new KeyboardEvent('keypress', eventInit));
+        document.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+
+        // 同时尝试在 activeElement 上触发
+        const el = document.activeElement || document.body;
+        el.dispatchEvent(new KeyboardEvent('keydown', eventInit));
+        el.dispatchEvent(new KeyboardEvent('keyup', eventInit));
+
+        return { success: true, method: 'keyboard' };
+      },
+    });
+
+    if (keyResult && keyResult.success) {
+      console.log('[navigateNextPage] 使用键盘 ArrowRight');
+      return true;
+    }
+
+  } catch (e) {
+    console.warn('[navigateNextPage] 键盘方法失败:', e.message);
+  }
+
+  // 方法2：尝试查找并点击"下一章"链接
+  try {
+    const [{ result: clickResult }] = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: () => {
+        // 常见的"下一章"文字匹配
+        const nextPatterns = [
+          '下一章', '下 一 章', '下一页', '后一页',
+          'next chapter', 'next', '»',
+          '>>', '→',
+        ];
+
+        const links = document.querySelectorAll('a, button, [role="button"], [onclick]');
+        for (const link of links) {
+          const text = (link.textContent || '').trim().toLowerCase();
+          const title = (link.title || '').toLowerCase();
+          const ariaLabel = (link.getAttribute('aria-label') || '').toLowerCase();
+
+          for (const pattern of nextPatterns) {
+            if (text.includes(pattern.toLowerCase()) ||
+                title.includes(pattern.toLowerCase()) ||
+                ariaLabel.includes(pattern.toLowerCase())) {
+              link.click();
+              return { success: true, method: 'click', element: text };
+            }
+          }
+        }
+
+        return { success: false, method: 'click', reason: 'no_next_button' };
+      },
+    });
+
+    if (clickResult && clickResult.success) {
+      console.log(`[navigateNextPage] 点击了 "${clickResult.element}"`);
+      return true;
+    }
+
+    console.warn('[navigateNextPage] 未找到下一章按钮');
+
+  } catch (e) {
+    console.warn('[navigateNextPage] 点击方法失败:', e.message);
+  }
+
+  return false;
+}
+
+/**
+ * 获取页面标题（用于文件命名）
+ */
+async function getPageTitle(tabId) {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: () => {
+        // 优先用 h1 标题
+        const h1 = document.querySelector('h1');
+        if (h1 && h1.textContent.trim()) {
+          return h1.textContent.trim().slice(0, 50);
+        }
+        // 其次用 title
+        if (document.title && document.title.trim()) {
+          return document.title.trim().slice(0, 50);
+        }
+        return '';
+      },
+    });
+    return result || '';
+  } catch (_) {
+    return '';
+  }
+}
+
+/**
+ * 清理文件名中的非法字符
+ */
+function sanitizeFilename(name) {
+  return name
+    .replace(/[\\/:*?"<>|]/g, '_')
+    .replace(/\s+/g, '_')
+    .substring(0, 50)
+    .trim() || '未命名';
+}
+
+// ============================================================
+// 公共工具函数
+// ============================================================
+
+function stop() { running = false; }
+
 async function getPageInfo(tabId) {
   const [{ result }] = await chrome.scripting.executeScript({
     target: { tabId: tabId },
     func: () => {
       const viewportH = window.innerHeight;
-
-      // 获取最大可滚动高度（兼容多种容器）
       const bodySH = document.body ? document.body.scrollHeight : 0;
       const docSH = document.documentElement ? document.documentElement.scrollHeight : 0;
       let scrollHeight = Math.max(bodySH, docSH, viewportH);
 
-      // 尝试找最大的 overflow 容器
+      // 找最大的 overflow 容器
       let containerEl = null;
       const allElements = document.querySelectorAll('*');
       for (const el of allElements) {
@@ -139,47 +444,26 @@ async function getPageInfo(tabId) {
       const canScroll = scrollHeight > viewportH + 10;
       const totalFrames = canScroll ? Math.ceil(scrollHeight / viewportH) : 1;
 
-      return {
-        scrollHeight: scrollHeight,
-        viewportH: viewportH,
-        canScroll: canScroll,
-        totalFrames: totalFrames,
-        hasCustomContainer: !!containerEl,
-      };
+      return { scrollHeight, viewportH, canScroll, totalFrames, hasCustomContainer: !!containerEl };
     },
   });
-
   return result;
 }
 
-/**
- * 滚动一个视口高度的量（兼容多种滚动容器）
- */
 async function scrollByViewport(tabId, amount) {
   await chrome.scripting.executeScript({
     target: { tabId: tabId },
     func: (stepSize) => {
-      // 方式1: window.scrollBy
       window.scrollBy(0, stepSize);
-
-      // 方式2: scrollTop 直接赋值
-      if (document.documentElement) {
-        document.documentElement.scrollTop += stepSize;
-      }
-      if (document.body) {
-        document.body.scrollTop += stepSize;
-      }
-
-      // 方式3: 找 overflow 容器并滚动
-      const allElements = document.querySelectorAll('*');
-      for (const el of allElements) {
+      if (document.documentElement) document.documentElement.scrollTop += stepSize;
+      if (document.body) document.body.scrollTop += stepSize;
+      // overflow 容器
+      const els = document.querySelectorAll('*');
+      for (const el of els) {
         try {
-          const style = getComputedStyle(el);
-          if ((style.overflow === 'auto' || style.overflow === 'scroll' ||
-               style.overflowY === 'auto' || style.overflowY === 'scroll')) {
-            if (el.scrollHeight > el.clientHeight + 10) {
-              el.scrollTop += stepSize;
-            }
+          const s = getComputedStyle(el);
+          if ((s.overflow === 'auto' || s.overflow === 'scroll' || s.overflowY === 'auto' || s.overflowY === 'scroll')) {
+            if (el.scrollHeight > el.clientHeight + 10) el.scrollTop += stepSize;
           }
         } catch (_) {}
       }
@@ -199,26 +483,6 @@ async function waitForFonts(tabId) {
       },
     });
   } catch (_) {}
-}
-
-function stop() { running = false; }
-
-async function save() {
-  try {
-    const url = await stitch(frames);
-    await new Promise((ok, fail) => {
-      chrome.downloads.download(
-        { url: url, filename: 'long_screenshot.png', saveAs: true },
-        (id) => {
-          if (chrome.runtime.lastError) fail(chrome.runtime.lastError);
-          else ok(id);
-        }
-      );
-    });
-  } catch (e) {
-    console.error('save err:', e);
-    send('error', { error: e.message });
-  }
 }
 
 async function stitch(list) {
