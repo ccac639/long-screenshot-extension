@@ -54,14 +54,18 @@ async function startMultiCapture(params) {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     send('update', { totalChapters: totalChapters >= 9999 ? '?' : totalChapters });
 
-    // 获取当前页标题作为第1章标题
-    const pageTitle = await getPageTitle(tab.id);
-
     // 主循环：逐章采集
     for (let ch = 1; ch <= totalChapters && running; ch++) {
       currentChapterNum = ch;
+
+      // 每次重新获取当前页标题（不能复用旧值）
+      const pageTitle = await getPageTitle(tab.id);
       send('chapterStart', { chapter: ch, title: pageTitle || `第${ch}章` });
       send('update', { currentChapter: ch });
+
+      // 记录当前 URL（用于调试跳章问题）
+      const currentUrl = await getCurrentUrl(tab.id);
+      send('log', { text: `📍 第${ch}章 开始 | URL: ${currentUrl}`, type: 'info' });
 
       try {
         // 等待字体加载 + 页面稳定
@@ -105,15 +109,28 @@ async function startMultiCapture(params) {
         send('update', {
           currentChapter: ch,
           status: `⏳ 第${ch}章已完成，准备翻到第${ch+1}章... (${chapterDelay}ms)`,
-          frameCount: -1,  // 特殊值表示翻页中
+          frameCount: -1,
         });
         await sleep(chapterDelay);
+
+        // 记录翻页前的 URL
+        const urlBefore = await getCurrentUrl(tab.id);
+        send('log', { text: `📍 翻页前 URL: ${urlBefore}`, type: 'info' });
 
         const navigated = await navigateNextPage(tab.id);
         if (!navigated) {
           send('log', { text: `⚠️ 无法翻到下一页（第${ch}章后停止）`, type: 'error' });
           break;
         }
+
+        // 记录翻页后的 URL
+        const urlAfter = await getCurrentUrl(tab.id);
+        send('log', { text: `📍 翻页后 URL: ${urlAfter}`, type: 'info' });
+
+        if (urlBefore === urlAfter) {
+          send('log', { text: `⚠️ 警告：翻页后 URL 未变化，可能翻页失败！`, type: 'error' });
+        }
+
         send('log', { text: `→ 已翻页，准备第 ${ch + 1} 章...`, type: 'info' });
         // 等待新页面加载
         send('update', {
@@ -286,6 +303,21 @@ async function navigateNextPage(tabId) {
   }
 
   return false;
+}
+
+/**
+ * 获取当前页面 URL（用于调试跳章问题）
+ */
+async function getCurrentUrl(tabId) {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: () => location.href,
+    });
+    return result || '';
+  } catch (_) {
+    return '';
+  }
 }
 
 /**
