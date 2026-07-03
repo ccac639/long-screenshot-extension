@@ -15,9 +15,18 @@
       <input type="number" id="scrollDelay" value="800" min="100" max="5000" step="100">
     </div>
 
-    <div class="control-group">
-      <label for="scrollStep">滚动步长 (px)</label>
-      <input type="number" id="scrollStep" value="800" min="100" max="2000" step="100">
+    <!-- 自动测高显示区域 -->
+    <div id="pageInfo" class="page-info hidden">
+      <div class="info-row">
+        <span class="info-label">页面高度:</span>
+        <span id="infoHeight">--</span>
+        <span class="info-unit">px</span>
+      </div>
+      <div class="info-row">
+        <span class="info-label">预计帧数:</span>
+        <span id="infoFrames">--</span>
+        <span class="info-unit">帧</span>
+      </div>
     </div>
 
     <div class="button-group">
@@ -27,7 +36,7 @@
 
     <div class="status">
       <div id="statusText">就绪</div>
-      <div id="frameCount">已捕获帧数: 0</div>
+      <div id="frameCount">已捕获帧数: 0 / --</div>
       <div id="progressBar" class="progress-bar">
         <div id="progressFill" class="progress-fill"></div>
       </div>
