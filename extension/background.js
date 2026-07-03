@@ -6,6 +6,7 @@ let running = false;
 let delay = 800;
 let ports = [];
 const MAX_FRAMES = 200;
+let offscreenReady = false;
 
 // 多章模式状态
 let multiMode = false;       // 是否多章模式
@@ -271,24 +272,11 @@ async function saveChapter(chapterFrames, filename, chapterNum) {
   try {
     const dataUrl = await stitch(chapterFrames);
 
-    // 方法：直接用 data URL 下载（Chrome 支持）
-    // filename 中的 "/" 会自动创建文件夹
-    await new Promise((ok, fail) => {
-      chrome.downloads.download(
-        { url: dataUrl, filename: filename, saveAs: false },
-        (id) => {
-          if (chrome.runtime.lastError) {
-            // 如果直接下载失败，尝试用 base64 数据创建 blob URL
-            console.warn('[saveChapter] 直接下载失败，尝试备用方法:', chrome.runtime.lastError.message);
-            fail(chrome.runtime.lastError);
-          } else {
-            console.log(`[saveChapter] 第${chapterNum}章下载已启动, id=${id}, 文件: ${filename}`);
-            ok(id);
-          }
-        }
-      );
-    });
+    // 用 offscreen document 下载（最可靠，支持自动创建文件夹）
+    await downloadViaOffscreen(dataUrl, filename);
 
+    console.log(`[saveChapter] 第${chapterNum}章已保存: ${filename}`);
+    send('log', { text: `✅ 第${chapterNum}章已保存 → ${filename}`, type: 'success' });
   } catch (e) {
     console.error(`[saveChapter-${chapterNum}] err:`, e);
     send('log', { text: `❌ 第${chapterNum}章保存失败: ${e.message}`, type: 'error' });
@@ -503,6 +491,61 @@ async function detectNovelName(tabId) {
     console.warn('[detectNovelName] 识别失败:', e.message);
   }
   return '未命名小说';
+}
+
+/**
+ * 确保 offscreen document 已创建
+ */
+async function ensureOffscreen() {
+  if (offscreenReady) return;
+  try {
+    // 先检查是否已有 offscreen document
+    const existing = await chrome.offscreen.hasDocument?.()?.catch?.(() => false);
+    if (!existing) {
+      await chrome.offscreen.createDocument({
+        url: 'offscreen.html',
+        reasons: [chrome.offscreen.Reason.DOWNLOAD],
+        justification: '用于处理图片下载，支持文件夹自动创建',
+      });
+    }
+    offscreenReady = true;
+  } catch (e) {
+    console.warn('[ensureOffscreen] 创建失败，将使用直连下载:', e.message);
+    offscreenReady = false;
+  }
+}
+
+/**
+ * 通过 offscreen document 下载文件（可靠方式）
+ */
+async function downloadViaOffscreen(dataUrl, filename) {
+  await ensureOffscreen();
+
+  if (offscreenReady) {
+    // 通过 runtime.sendMessage 发给 offscreen document
+    try {
+      const resp = await chrome.runtime.sendMessage({
+        action: 'download',
+        dataUrl: dataUrl,
+        filename: filename,
+      });
+      if (resp && resp.ok) return;
+      console.warn('[download] offscreen 失败，改用直连:', resp?.error);
+    } catch (e) {
+      console.warn('[download] offscreen 消息失败，改用直连:', e.message);
+    }
+  }
+
+  // 直连备用：直接调用 downloads API
+  return new Promise((ok, fail) => {
+    chrome.downloads.download(
+      { url: dataUrl, filename: filename, saveAs: false },
+      (id) => {
+        if (chrome.runtime.lastError) fail(chrome.runtime.lastError);
+        else { console.log('[download] 直连下载启动, id:', id); ok(); }
+      }
+    );
+  });
 }
 
 // ============================================================
