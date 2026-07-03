@@ -47,7 +47,7 @@ async function loop(tab) {
   // 第1帧：截图当前视口（顶部）
   let url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
   frames.push(url);
-  lastImagePrefix = url.slice(0, 2000);
+  lastImagePrefix = url; // 保存完整字符串用于采样比较
   send('update', { frameCount: frames.length, status: `已截 ${frames.length} 帧...` });
 
   let duplicateCount = 0;
@@ -60,8 +60,9 @@ async function loop(tab) {
       if (!scrollResult.didMove) {
         // 页面没有移动 → 可能到底了
         duplicateCount++;
+        send('update', { frameCount: frames.length, status: `页面未滚动(${duplicateCount}/5)...` });
         console.log(`[loop] 滚动未生效 (${duplicateCount}次)，可能到达底部`);
-        if (duplicateCount >= 3) break;
+        if (duplicateCount >= 5) break; // 放宽到5次
       } else {
         duplicateCount = 0;
       }
@@ -75,14 +76,15 @@ async function loop(tab) {
       // 轻量去重
       if (!isDuplicate(url)) {
         frames.push(url);
-        lastImagePrefix = url.slice(0, 2000);
+        lastImagePrefix = url; // 保存完整字符串用于下次采样比较
         duplicateCount = 0;
         send('update', { frameCount: frames.length, status: `已截 ${frames.length} 帧...` });
         console.log(`[loop] 第 ${i+1} 帧 ✓ (共 ${frames.length} 帧)`);
       } else {
         duplicateCount++;
-        console.log(`[loop] 重复帧 (${duplicateCount}/3)`);
-        if (duplicateCount >= 3) break;
+        send('update', { frameCount: frames.length, status: `检测到重复帧(${duplicateCount}/5)...` });
+        console.log(`[loop] 重复帧 (${duplicateCount}/5)`);
+        if (duplicateCount >= 5) break; // 放宽到5次才退出
       }
 
       // 底部双重确认
@@ -211,9 +213,15 @@ async function checkAtBottom(tabId) {
   return result;
 }
 
+// 去重检测：比较 base64 中间位置采样（跳过 PNG 固定头部，避免误判）
 function isDuplicate(imgDataUrl) {
   if (!lastImagePrefix) return false;
-  return imgDataUrl.slice(0, 2000) === lastImagePrefix;
+  // 从 offset=500 处取 3000 字符，避开 PNG 固定头部区域
+  const SAMPLE_OFFSET = 500;
+  const SAMPLE_LEN = 3000;
+  const cur = imgDataUrl.slice(SAMPLE_OFFSET, SAMPLE_OFFSET + SAMPLE_LEN);
+  const prev = lastImagePrefix.slice(SAMPLE_OFFSET, SAMPLE_OFFSET + SAMPLE_LEN);
+  return cur === prev;
 }
 
 function stop() { running = false; }
