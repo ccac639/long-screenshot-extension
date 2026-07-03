@@ -380,13 +380,26 @@ async function getPageTitle(tabId) {
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tabId },
       func: () => {
-        // 优先用 h1 标题
-        const h1 = document.querySelector('h1');
-        if (h1 && h1.textContent.trim()) {
-          return h1.textContent.trim().slice(0, 50);
+        // 1. 优先用常见章节标题选择器
+        const chapterSelectors = [
+          '.muye-reader-nav-title',  // 用户网站
+          '.chapter-title', '.reader-chapter-title',
+          '.entry-title', '.post-title',
+          'h1', 'h2',
+        ];
+        for (const sel of chapterSelectors) {
+          const el = document.querySelector(sel);
+          if (el && el.textContent.trim()) {
+            return el.textContent.trim().slice(0, 50);
+          }
         }
-        // 其次用 title
+        // 2. 其次用 title（去掉小说名部分）
         if (document.title && document.title.trim()) {
+          // 尝试去掉 " - 小说名" 后缀
+          const parts = document.title.split(/\s*[-–—]\s*/);
+          if (parts.length >= 2) {
+            return parts[0].trim().slice(0, 50);
+          }
           return document.title.trim().slice(0, 50);
         }
         return '';
@@ -451,22 +464,47 @@ async function detectNovelName(tabId) {
           }
         }
 
-        // 2. 查找页面中的小说名元素（常见 class/id）
+        // 2. 查找页面中的小说名元素（增加更多常见选择器）
         const selectors = [
+          // 通用小说网站
           '.novel-name', '.book-name', '.bookname', '.novelname',
           '#book-name', '#novel-name', '#bookname',
           '.info-name', '.work-name', '.fiction-name',
           '[itemprop="name"]',
           'meta[property="og:novel"]',
           'meta[property="og:title"]',
+          // 阅读器页面常见（番茄/起点/刺猬猫等）
+          '.reader-book-name', '.book-info-name', '.novel-title',
+          '.reader-header-book', '.reader-top-book-name',
+          '[class*="book-name"]', '[class*="novel-name"]',
+          // 用户网站相关
+          '.muye-reader-nav-title',
         ];
         for (const sel of selectors) {
           const el = document.querySelector(sel);
           if (el) {
             const txt = (el.textContent || el.content || '').trim();
-            if (txt && txt.length >= 2 && txt.length <= 30) {
+            // 过滤掉章节名（包含"第X章"的）
+            if (txt && txt.length >= 2 && txt.length <= 50 && !/第[0-9零一二三四五六七八九十百千]+[章节]/.test(txt)) {
               return { source: 'element', name: txt };
             }
+          }
+        }
+
+        // 2.5 特殊：如果页面有 .muye-reader-nav-title，尝试找父级中的小说名
+        const titleEl = document.querySelector('.muye-reader-nav-title');
+        if (titleEl) {
+          // 向上查找包含小说名的元素（通常在 header 或 nav 中）
+          let parent = titleEl.parentElement;
+          for (let i = 0; i < 5 && parent; i++) {
+            const links = parent.querySelectorAll('a');
+            for (const link of links) {
+              const txt = link.textContent.trim();
+              if (txt && txt.length >= 2 && txt.length <= 50 && !txt.includes('下一章') && !txt.includes('返回')) {
+                return { source: 'parent-link', name: txt };
+              }
+            }
+            parent = parent.parentElement;
           }
         }
 
