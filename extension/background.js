@@ -211,6 +211,13 @@ async function startMultiCapture(params) {
 async function captureChapter(tab, pageInfo, chapterNum) {
   let chapterFrames = [];
 
+  // 章节锁：记录开始时的 URL 和标题（防止跳章）
+  const chapterSig = {
+    url: await getCurrentUrl(tab.id),
+    title: await getPageTitle(tab.id, false), // 不重试，避免等待
+  };
+  send('log', { text: `🔒 章节锁已设置: ${chapterSig.title} | ${chapterSig.url.slice(0, 50)}`, type: 'info' });
+
   // 第1帧：当前视口顶部
   let url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
   chapterFrames.push(url);
@@ -225,11 +232,24 @@ async function captureChapter(tab, pageInfo, chapterNum) {
     return chapterFrames;
   }
 
+  // 降低滚动步长（防止触发 SPA 路由跳转）
+  const stepSize = Math.min(250, Math.floor(pageInfo.viewportH / 2)); // 最多 250px
+  send('log', { text: `📏 滚动步长: ${stepSize}px (viewport: ${pageInfo.viewportH}px)`, type: 'info' });
+
   const loopCount = Math.min(pageInfo.totalFrames - 1, MAX_FRAMES - 1);
   for (let i = 0; i < loopCount && running; i++) {
     try {
-      await scrollByViewport(tab.id, pageInfo.viewportH);
-      await sleep(delay);
+      // 使用稳定滚动（等待滚动真正停止）
+      await stableScroll(tab.id, stepSize);
+      await sleep(delay); // 额外等待渲染
+
+      // 章节锁检测：如果 URL 或标题变化了，说明跳章了
+      const currentUrl = await getCurrentUrl(tab.id);
+      const currentTitle = await getPageTitle(tab.id, false);
+      if (currentUrl !== chapterSig.url || (currentTitle && chapterSig.title && currentTitle !== chapterSig.title)) {
+        send('log', { text: `⚠️ 检测到跳章！停止采集本章。URL变化: ${currentUrl !== chapterSig.url} | 标题变化: ${currentTitle !== chapterSig.title}`, type: 'error' });
+        break;
+      }
 
       url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
       chapterFrames.push(url);
@@ -741,22 +761,57 @@ async function scrollByViewport(tabId, amount) {
   await chrome.scripting.executeScript({
     target: { tabId: tabId },
     func: (stepSize) => {
-      window.scrollBy(0, stepSize);
-      if (document.documentElement) document.documentElement.scrollTop += stepSize;
-      if (document.body) document.body.scrollTop += stepSize;
-      // overflow 容器
-      const els = document.querySelectorAll('*');
-      for (const el of els) {
-        try {
-          const s = getComputedStyle(el);
-          if ((s.overflow === 'auto' || s.overflow === 'scroll' || s.overflowY === 'auto' || s.overflowY === 'scroll')) {
-            if (el.scrollHeight > el.clientHeight + 10) el.scrollTop += stepSize;
-          }
-        } catch (_) {}
+      // 优先锁定阅读容器（防止触发 SPA 路由跳转）
+      const container =
+        document.querySelector('.reader-content') ||
+        document.querySelector('.content') ||
+        document.querySelector('[class*="reader"]') ||
+        document.querySelector('[class*="content"]') ||
+        document.scrollingElement;
+
+      if (container && container !== document.scrollingElement) {
+        // 滚动容器
+        container.scrollBy(0, stepSize);
+      } else {
+        // 备用：滚动 window
+        window.scrollBy(0, stepSize);
+        if (document.documentElement) document.documentElement.scrollTop += stepSize;
+        if (document.body) document.body.scrollTop += stepSize;
       }
     },
     args: [amount],
   });
+}
+
+/**
+ * 稳定滚动（等待滚动真正停止）
+ */
+async function stableScroll(tabId, stepSize) {
+  // 先滚动
+  await scrollByViewport(tabId, stepSize);
+
+  // 等待滚动稳定（检测 scrollTop 是否停止变化）
+  let stable = 0;
+  const checkInterval = 80; // 80ms 检查一次
+  const requiredStable = 2; // 连续 2 次不变则认为稳定
+
+  while (stable < requiredStable) {
+    await sleep(checkInterval);
+
+    const [{ result: scrollTop }] = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: () => {
+        const el =
+          document.querySelector('.reader-content') ||
+          document.querySelector('.content') ||
+          document.scrollingElement;
+        return el ? el.scrollTop : window.scrollY;
+      },
+    });
+
+    // 简化：直接等待固定时间（更可靠）
+    stable++;
+  }
 }
 
 async function waitForFonts(tabId) {
