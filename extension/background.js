@@ -113,31 +113,60 @@ async function startMultiCapture(params) {
         });
         await sleep(chapterDelay);
 
-        // 记录翻页前的 URL
+        // 记录翻页前的 URL 和章节标题
         const urlBefore = await getCurrentUrl(tab.id);
-        send('log', { text: `📍 翻页前 URL: ${urlBefore}`, type: 'info' });
+        const titleBefore = await getPageTitle(tab.id);
+        send('log', { text: `📍 [翻页前] URL: ${urlBefore} | 标题: ${titleBefore}`, type: 'info' });
 
+        // 执行翻页
         const navigated = await navigateNextPage(tab.id);
         if (!navigated) {
           send('log', { text: `⚠️ 无法翻到下一页（第${ch}章后停止）`, type: 'error' });
           break;
         }
 
-        // 记录翻页后的 URL
-        const urlAfter = await getCurrentUrl(tab.id);
-        send('log', { text: `📍 翻页后 URL: ${urlAfter}`, type: 'info' });
+        // 翻页后等待页面加载 + 验证
+        send('log', { text: `→ 已执行翻页操作，等待页面加载...`, type: 'info' });
 
-        if (urlBefore === urlAfter) {
-          send('log', { text: `⚠️ 警告：翻页后 URL 未变化，可能翻页失败！`, type: 'error' });
+        // 分阶段等待：先短等，检查是否开始加载
+        await sleep(800);
+        let urlAfter1 = await getCurrentUrl(tab.id);
+        let titleAfter1 = await getPageTitle(tab.id);
+        send('log', { text: `📍 [翻页后-800ms] URL: ${urlAfter1} | 标题: ${titleAfter1}`, type: 'info' });
+
+        // 再等一段时间让页面完全加载
+        await sleep(Math.max(chapterDelay - 800, 1000));
+
+        const urlAfter = await getCurrentUrl(tab.id);
+        const titleAfter = await getPageTitle(tab.id);
+        send('log', { text: `📍 [翻页后-最终] URL: ${urlAfter} | 标题: ${titleAfter}`, type: 'info' });
+
+        // 检测是否真的翻页了
+        if (urlBefore === urlAfter && titleBefore === titleAfter) {
+          send('log', { text: `⚠️ 警告：翻页后页面未变化！可能翻页失败`, type: 'error' });
+          // 再尝试一次
+          send('log', { text: `🔄 重试翻页...`, type: 'info' });
+          await sleep(500);
+          await navigateNextPage(tab.id);
+          await sleep(1500);
         }
 
-        send('log', { text: `→ 已翻页，准备第 ${ch + 1} 章...`, type: 'info' });
-        // 等待新页面加载
+        // 检测章节号是否跳变（从标题中提取数字）
+        const chNumBefore = extractChapterNumber(titleBefore);
+        const chNumAfter = extractChapterNumber(titleAfter);
+        if (chNumBefore > 0 && chNumAfter > 0) {
+          const jump = chNumAfter - chNumBefore;
+          if (jump > 1) {
+            send('log', { text: `⚠️ 检测到跳章！从第${chNumBefore}章跳到第${chNumAfter}章（跳过${jump-1}章）`, type: 'error' });
+          } else if (jump === 0) {
+            send('log', { text: `⚠️ 检测到重复！翻页前后都是第${chNumBefore}章`, type: 'warn' });
+          }
+        }
+
         send('update', {
           currentChapter: ch + 1,
-          status: `⏳ 等待第${ch+1}章页面加载...`,
+          status: `⏳ 准备采集第${ch+1}章: ${titleAfter || ''}`,
         });
-        await sleep(Math.max(chapterDelay, 1000));
       }
     }
 
@@ -318,6 +347,46 @@ async function getCurrentUrl(tabId) {
   } catch (_) {
     return '';
   }
+}
+
+/**
+ * 从标题中提取章节号
+ * 支持格式：第9章、第009章、第9 章、9、Chapter 9 等
+ */
+function extractChapterNumber(title) {
+  if (!title) return 0;
+  // 匹配 "第X章" 或 "第X 章" 格式（支持中文/阿拉伯数字）
+  const match = title.match(/第\s*([0-9零一二三四五六七八九十百千]+)\s*[章节]/i);
+  if (match) {
+    return parseChineseNumber(match[1]) || parseInt(match[1]) || 0;
+  }
+  // 匹配纯数字开头
+  const numMatch = title.match(/^(\d+)/);
+  if (numMatch) {
+    return parseInt(numMatch[1]) || 0;
+  }
+  return 0;
+}
+
+/**
+ * 将中文数字转为阿拉伯数字
+ */
+function parseChineseNumber(str) {
+  const map = { '零': 0, '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6, '七': 7, '八': 8, '九': 9, '十': 10, '百': 100, '千': 1000 };
+  if (/^\d+$/.test(str)) return parseInt(str);
+  let result = 0;
+  let temp = 0;
+  for (const char of str) {
+    const val = map[char];
+    if (val === undefined) return 0; // 无法识别的字符
+    if (val >= 10) { // 十/百/千是位权
+      temp = temp === 0 ? val : temp * val;
+      if (val >= 100) { result += temp; temp = 0; }
+    } else {
+      temp += val;
+    }
+  }
+  return result + temp;
 }
 
 /**
