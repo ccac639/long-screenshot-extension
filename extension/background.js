@@ -383,32 +383,6 @@ async function navigateNextPage(tabId) {
 
   return false;
 }
-            if (text.includes(pattern.toLowerCase()) ||
-                title.includes(pattern.toLowerCase()) ||
-                ariaLabel.includes(pattern.toLowerCase())) {
-              link.click();
-              return { success: true, method: 'click', element: text };
-            }
-          }
-        }
-
-        return { success: false, method: 'click', reason: 'no_next_button' };
-      },
-    });
-
-    if (clickResult && clickResult.success) {
-      console.log(`[navigateNextPage] 点击了 "${clickResult.element}"`);
-      return true;
-    }
-
-    console.warn('[navigateNextPage] 未找到下一章按钮');
-
-  } catch (e) {
-    console.warn('[navigateNextPage] 点击方法失败:', e.message);
-  }
-
-  return false;
-}
 
 /**
  * 获取当前页面 URL（用于调试跳章问题）
