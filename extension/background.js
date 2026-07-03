@@ -466,75 +466,58 @@ function parseChineseNumber(str) {
  * 增加重试机制：如果标题是小说名（不含"第X章"），等待页面更新后再获取
  */
 async function getPageTitle(tabId, retry) {
-  retry = retry !== false;  // 默认启用重试
+  retry = retry !== false;
   try {
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tabId },
       func: () => {
-        // 1. 优先用用户网站的章节标题选择器（注意是 .muye-reader-nav-title）
-        const chapterSelectors = [
-          '.muye-reader-nav-title',  // 用户网站（正确拼写）
-          '.muye-reader-content h1',
-          '.chapter-title', '.reader-chapter-title',
-          '.entry-title', '.post-title',
-          'h1', 'h2',
+        const out = { title: '', debug: [] };
+        // 增加更多选择器
+        const sels = [
+          '.muye-reader-nav-title',
+          'h1',
+          'h2',
+          '.chapter-title',
+          '.reader-chapter-title',
+          '.entry-title',
+          '.post-title',
+          '[class*="chapter"]',
+          '[class*="title"]',
         ];
-        for (const sel of chapterSelectors) {
-          const el = document.querySelector(sel);
+        for (const s of sels) {
+          const el = document.querySelector(s);
           if (el && el.textContent.trim()) {
-            return el.textContent.trim().slice(0, 50);
+            out.title = el.textContent.trim().slice(0, 50);
+            out.debug.push('sel:' + s + '=' + out.title.slice(0, 20));
+            break;
           }
         }
-
-        // 2. 从 document.title 解析章节名
-        if (document.title && document.title.trim()) {
-          // "第X章 XXX - 小说名 - 网站名"
-          // 取第一个 " - " 前面的部分（章节名）
+        if (!out.title && document.title) {
           const idx = document.title.indexOf(' - ');
-          if (idx > 0) {
-            return document.title.substring(0, idx).trim().slice(0, 50);
-          }
-          return document.title.trim().slice(0, 50);
+          out.title = idx > 0 ? document.title.substring(0, idx).trim().slice(0, 50) : document.title.trim().slice(0, 50);
+          out.debug.push('title-parse:' + out.title.slice(0, 20));
         }
-        return '';
+        return out;
       },
     });
-
-    // 如果启用了重试，且标题看起来像小说名（不含"第"和"章"），等待后重试
-    if (retry && result && !/第.+[章节]/.test(result)) {
-      // 等待 800ms 让页面更新
-      await sleep(800);
-      const [{ result: result2 }] = await chrome.scripting.executeScript({
+    const title = result ? (result.title || '') : '';
+    const dbg = result ? (result.debug || []) : [];
+    if (dbg.length) send('log', { text: '🔍 getTitle:' + dbg.join(';'), type: 'info' });
+    // 重试
+    if (retry && title && !/第.+[章节]/.test(title)) {
+      await new Promise(r => setTimeout(r, 1000));
+      const [{ result: r2 }] = await chrome.scripting.executeScript({
         target: { tabId: tabId },
         func: () => {
-          // 再次尝试获取章节标题
-          const chapterSelectors = [
-            '.muye-reader-nav-title',
-            '.chapter-title', '.reader-chapter-title',
-            'h1', 'h2',
-          ];
-          for (const sel of chapterSelectors) {
-            const el = document.querySelector(sel);
-            if (el && el.textContent.trim()) {
-              return el.textContent.trim().slice(0, 50);
-            }
-          }
-          // 返回 document.title 的第一部分
-          if (document.title) {
-            const idx = document.title.indexOf(' - ');
-            if (idx > 0) {
-              return document.title.substring(0, idx).trim().slice(0, 50);
-            }
-            return document.title.trim().slice(0, 50);
-          }
-          return '';
+          const el = document.querySelector('.muye-reader-nav-title') || document.querySelector('h1');
+          return el ? el.textContent.trim().slice(0, 50) : (document.title || '').split(' - ')[0] || '';
         },
       });
-      return result2 || result || '';
+      return r2 || title || '';
     }
-
-    return result || '';
-  } catch (_) {
+    return title || '';
+  } catch (e) {
+    send('log', { text: '❌ getPageTitle 出错:' + e.message, type: 'error' });
     return '';
   }
 }
