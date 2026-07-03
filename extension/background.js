@@ -43,6 +43,7 @@ async function startMultiCapture(params) {
   currentChapterNum = 1;
   running = true;
   multiMode = true;
+  let totalFrameCount = 0;  // 用于统计总帧数
 
   // 自动获取小说名（不再依赖手动输入）
   send('log', { text: '🔍 正在自动识别小说名称...', type: 'info' });
@@ -90,6 +91,9 @@ async function startMultiCapture(params) {
           const chTitle = await getPageTitle(tab.id) || `${ch}`;
           const filename = `${safeName}/第${String(ch).padStart(3, '0')}章_${chTitle}.png`;
           await saveChapter(capturedFrames, filename, ch);
+
+          // 累加帧数
+          totalFrameCount += capturedFrames.length;
 
           send('chapterDone', {
             chapter: ch,
@@ -188,8 +192,8 @@ async function startMultiCapture(params) {
     }
 
     send('complete', {
-      totalChapters: currentChapterNum,
-      totalFrames: frames.reduce((sum, f) => sum + f.length, 0),
+      totalChapters: currentChapterNum - 1,  // 已完成的章节数
+      totalFrames: totalFrameCount,  // 用局部变量统计
     });
 
   } catch (e) {
@@ -459,15 +463,18 @@ function parseChineseNumber(str) {
 
 /**
  * 获取页面标题（用于文件命名）
+ * 增加重试机制：如果标题是小说名（不含"第X章"），等待页面更新后再获取
  */
-async function getPageTitle(tabId) {
+async function getPageTitle(tabId, retry) {
+  retry = retry !== false;  // 默认启用重试
   try {
     const [{ result }] = await chrome.scripting.executeScript({
       target: { tabId: tabId },
       func: () => {
-        // 1. 优先用常见章节标题选择器
+        // 1. 优先用用户网站的章节标题选择器（注意是 .muye-reader-nav-title）
         const chapterSelectors = [
-          '.muye-reader-nav-title',  // 用户网站
+          '.muye-reader-nav-title',  // 用户网站（正确拼写）
+          '.muye-reader-content h1',
           '.chapter-title', '.reader-chapter-title',
           '.entry-title', '.post-title',
           'h1', 'h2',
@@ -478,18 +485,54 @@ async function getPageTitle(tabId) {
             return el.textContent.trim().slice(0, 50);
           }
         }
-        // 2. 其次用 title（去掉小说名部分）
+
+        // 2. 从 document.title 解析章节名
         if (document.title && document.title.trim()) {
-          // 尝试去掉 " - 小说名" 后缀
-          const parts = document.title.split(/\s*[-–—]\s*/);
-          if (parts.length >= 2) {
-            return parts[0].trim().slice(0, 50);
+          // "第X章 XXX - 小说名 - 网站名"
+          // 取第一个 " - " 前面的部分（章节名）
+          const idx = document.title.indexOf(' - ');
+          if (idx > 0) {
+            return document.title.substring(0, idx).trim().slice(0, 50);
           }
           return document.title.trim().slice(0, 50);
         }
         return '';
       },
     });
+
+    // 如果启用了重试，且标题看起来像小说名（不含"第"和"章"），等待后重试
+    if (retry && result && !/第.+[章节]/.test(result)) {
+      // 等待 800ms 让页面更新
+      await sleep(800);
+      const [{ result: result2 }] = await chrome.scripting.executeScript({
+        target: { tabId: tabId },
+        func: () => {
+          // 再次尝试获取章节标题
+          const chapterSelectors = [
+            '.muye-reader-nav-title',
+            '.chapter-title', '.reader-chapter-title',
+            'h1', 'h2',
+          ];
+          for (const sel of chapterSelectors) {
+            const el = document.querySelector(sel);
+            if (el && el.textContent.trim()) {
+              return el.textContent.trim().slice(0, 50);
+            }
+          }
+          // 返回 document.title 的第一部分
+          if (document.title) {
+            const idx = document.title.indexOf(' - ');
+            if (idx > 0) {
+              return document.title.substring(0, idx).trim().slice(0, 50);
+            }
+            return document.title.trim().slice(0, 50);
+          }
+          return '';
+        },
+      });
+      return result2 || result || '';
+    }
+
     return result || '';
   } catch (_) {
     return '';
