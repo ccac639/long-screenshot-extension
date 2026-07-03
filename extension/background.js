@@ -247,16 +247,113 @@ async function saveChapter(chapterFrames, filename, chapterNum) {
 }
 
 /**
- * 翻到下一页（模拟键盘方向键→）
- * 大多数小说站的"下一章"按钮可以通过键盘 → 触发
+ * 翻到下一页（优先点击"下一章"按钮）
+ * 用户网站按钮：<button class="byte-btn ... muye-button"><span>下一章</span></button>
  */
 async function navigateNextPage(tabId) {
+  // 方法1（优先）：尝试查找并点击"下一章"按钮
   try {
-    // 方法1：模拟键盘 ArrowRight 键
+    const [{ result: clickResult }] = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: () => {
+        // 优先匹配用户的网站按钮结构
+        const prioritySelectors = [
+          // 精确匹配用户提供的按钮 HTML 结构
+          'button.muye-button span',
+          'button.muye-button',
+          '.muye-button',
+          // 包含"下一章"文字的按钮
+          'button:contains("下一章")',  // jQuery 风格，JS 需手动过滤
+          // 通用选择器
+          'a.next-chapter', 'button.next-chapter',
+          '.next-chapter', '.nextChapter',
+        ];
+
+        // 方法 A：遍历所有按钮/链接，匹配文字
+        const nextPatterns = [
+          '下一章', '下 一 章', '下一页', '后一页',
+          'next chapter', 'next', '»', '>>', '→',
+        ];
+
+        // 先尝试精确匹配按钮结构
+        const allButtons = document.querySelectorAll('button, a, [role="button"], [onclick]');
+        let foundBtn = null;
+
+        // 第一遍：精确匹配"下一章"文字
+        for (const el of allButtons) {
+          const text = (el.textContent || '').trim();
+          const html = el.innerHTML || '';
+
+          // 精确匹配"下一章"
+          if (text === '下一章' || text.includes('下一章')) {
+            // 排除"上一章"（有些网站两个按钮挨着）
+            if (!text.includes('上一章') || text === '下一章') {
+              foundBtn = el;
+              break;
+            }
+          }
+
+          // 匹配 span 内的文字（用户网站结构）
+          const spans = el.querySelectorAll('span');
+          for (const span of spans) {
+            const spanText = (span.textContent || '').trim();
+            if (spanText === '下一章') {
+              foundBtn = el;
+              break;
+            }
+          }
+          if (foundBtn) break;
+        }
+
+        // 第二遍：模糊匹配
+        if (!foundBtn) {
+          for (const el of allButtons) {
+            const text = (el.textContent || '').trim().toLowerCase();
+            for (const pattern of nextPatterns) {
+              if (text.includes(pattern.toLowerCase()) && !text.includes('上一')) {
+                foundBtn = el;
+                break;
+              }
+            }
+            if (foundBtn) break;
+          }
+        }
+
+        if (foundBtn) {
+          // 滚动到按钮可见
+          foundBtn.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+          // 多种点击方式确保触发
+          foundBtn.click();
+          foundBtn.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          return {
+            success: true,
+            method: 'click',
+            text: (foundBtn.textContent || '').trim().slice(0, 30),
+            tag: foundBtn.tagName,
+          };
+        }
+
+        return { success: false, reason: 'no_next_button_found' };
+      },
+    });
+
+    if (clickResult && clickResult.success) {
+      console.log(`[navigateNextPage] 点击了 "${clickResult.text}" (${clickResult.tag})`);
+      send('log', { text: `🖱️ 已点击按钮: ${clickResult.text}`, type: 'success' });
+      return true;
+    }
+
+    console.warn('[navigateNextPage] 未找到下一章按钮，尝试键盘方法');
+
+  } catch (e) {
+    console.warn('[navigateNextPage] 点击方法失败:', e.message);
+  }
+
+  // 方法2（备用）：模拟键盘 ArrowRight 键
+  try {
     const [{ result: keyResult }] = await chrome.scripting.executeScript({
       target: { tabId: tabId },
       func: () => {
-        // 创建并分发键盘事件
         const eventInit = {
           key: 'ArrowRight',
           code: 'ArrowRight',
@@ -265,48 +362,27 @@ async function navigateNextPage(tabId) {
           bubbles: true,
           cancelable: true,
         };
-
         document.dispatchEvent(new KeyboardEvent('keydown', eventInit));
         document.dispatchEvent(new KeyboardEvent('keypress', eventInit));
         document.dispatchEvent(new KeyboardEvent('keyup', eventInit));
-
-        // 同时尝试在 activeElement 上触发
         const el = document.activeElement || document.body;
         el.dispatchEvent(new KeyboardEvent('keydown', eventInit));
         el.dispatchEvent(new KeyboardEvent('keyup', eventInit));
-
         return { success: true, method: 'keyboard' };
       },
     });
 
     if (keyResult && keyResult.success) {
       console.log('[navigateNextPage] 使用键盘 ArrowRight');
+      send('log', { text: `⌨️ 已模拟键盘 → 键翻页`, type: 'info' });
       return true;
     }
-
   } catch (e) {
     console.warn('[navigateNextPage] 键盘方法失败:', e.message);
   }
 
-  // 方法2：尝试查找并点击"下一章"链接
-  try {
-    const [{ result: clickResult }] = await chrome.scripting.executeScript({
-      target: { tabId: tabId },
-      func: () => {
-        // 常见的"下一章"文字匹配
-        const nextPatterns = [
-          '下一章', '下 一 章', '下一页', '后一页',
-          'next chapter', 'next', '»',
-          '>>', '→',
-        ];
-
-        const links = document.querySelectorAll('a, button, [role="button"], [onclick]');
-        for (const link of links) {
-          const text = (link.textContent || '').trim().toLowerCase();
-          const title = (link.title || '').toLowerCase();
-          const ariaLabel = (link.getAttribute('aria-label') || '').toLowerCase();
-
-          for (const pattern of nextPatterns) {
+  return false;
+}
             if (text.includes(pattern.toLowerCase()) ||
                 title.includes(pattern.toLowerCase()) ||
                 ariaLabel.includes(pattern.toLowerCase())) {
