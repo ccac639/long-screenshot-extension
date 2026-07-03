@@ -14,17 +14,10 @@
       <h1>长截图采集</h1>
     </div>
 
-    <!-- 模式选择 -->
+    <!-- 多章采集设置 -->
     <div class="section">
-      <div class="section-title">采集模式</div>
-      <div class="mode-switch">
-        <button id="modeSingle" class="mode-btn active">单章截图</button>
-        <button id="modeMulti" class="mode-btn">多章采集</button>
-      </div>
-    </div>
+      <div class="section-title">采集设置</div>
 
-    <!-- 多章模式设置 -->
-    <div id="multiSettings" class="section hidden">
       <div class="control-group">
         <label>小说名称</label>
         <div id="novelNameDisplay" class="novel-name-display">（开始后将自动识别）</div>
@@ -55,27 +48,11 @@
         <input type="number" id="chapterDelay" value="1500" min="500" max="10000" step="100">
         <div class="hint">翻页后等待页面加载的时间</div>
       </div>
-    </div>
 
-    <!-- 单章模式设置 -->
-    <div id="singleSettings" class="section">
       <div class="control-group">
         <label for="scrollDelay">滚动延迟 (ms)</label>
         <input type="number" id="scrollDelay" value="800" min="100" max="5000" step="100">
-      </div>
-    </div>
-
-    <!-- 页面信息（测高后显示）-->
-    <div id="pageInfo" class="page-info hidden">
-      <div class="info-row">
-        <span class="info-label">页面高度:</span>
-        <span id="infoHeight">--</span>
-        <span class="info-unit">px</span>
-      </div>
-      <div class="info-row">
-        <span class="info-label">预计帧数:</span>
-        <span id="infoFrames">--</span>
-        <span class="info-unit">帧</span>
+        <div class="hint">截图时每帧滚动后的等待时间</div>
       </div>
     </div>
 
@@ -89,15 +66,15 @@
     <div class="status">
       <div id="statusText" class="status-text">就绪</div>
 
-      <!-- 多章进度 -->
-      <div id="chapterInfo" class="chapter-info hidden">
+      <!-- 章节进度 -->
+      <div id="chapterInfo">
         正在采集: 第 <strong id="currentChapter">1</strong> / <strong id="totalChapters">1</strong> 章
         <div class="chapter-bar">
           <div id="chapterFill" class="chapter-fill"></div>
         </div>
       </div>
 
-      <!-- 单章进度 -->
+      <!-- 单章帧进度 -->
       <div id="frameInfo">
         <div id="frameCount">已捕获: 0 帧</div>
         <div class="progress-bar">

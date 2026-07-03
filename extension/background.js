@@ -1,5 +1,5 @@
-// background.js - MV3 长截图采集 v4.0（多章版）
-// 功能：单章截图 / 多章采集 / 自动翻页 / 文件夹保存
+// background.js - MV3 长截图采集 v5.0（仅多章模式）
+// 功能：多章采集 / 自动翻页 / 文件夹保存 / 自动识别小说名
 
 let frames = [];
 let running = false;
@@ -9,21 +9,17 @@ const MAX_FRAMES = 200;
 let offscreenReady = false;
 
 // 多章模式状态
-let multiMode = false;       // 是否多章模式
-let novelName = '';          // 小说名称
-let totalChapters = 1;       // 总章节数
-let currentChapterNum = 1;   // 当前章节号
+let multiMode = true;        // 默认多章模式
+let novelName = '';           // 小说名称
+let totalChapters = 1;        // 总章节数
+let currentChapterNum = 1;    // 当前章节号
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'popup') return;
   ports.push(port);
   port.onMessage.addListener((msg) => {
     if (msg.action === 'start') {
-      if (msg.mode === 'multi') {
-        startMultiCapture(msg);
-      } else {
-        startSingle(msg);
-      }
+      startMultiCapture(msg);
     }
     if (msg.action === 'stop') stop();
     if (msg.action === 'detectNovelName') {
@@ -37,94 +33,7 @@ chrome.runtime.onConnect.addListener((port) => {
 });
 
 // ============================================================
-// 单章模式（原有逻辑）
-// ============================================================
-
-async function startSingle(params) {
-  delay = params.scrollDelay || 800;
-  running = true;
-  frames = [];
-  multiMode = false;
-
-  try {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-
-    send('update', { frameCount: 0, status: '正在测量页面高度...' });
-    await waitForFonts(tab.id);
-
-    const pageInfo = await getPageInfo(tab.id);
-    send('update', {
-      frameCount: 0,
-      status: `页面总高 ${pageInfo.scrollHeight}px，预计 ${pageInfo.totalFrames} 帧`,
-      totalFrames: pageInfo.totalFrames,
-      scrollHeight: pageInfo.scrollHeight,
-    });
-
-    await loopSingle(tab, pageInfo);
-  } catch (e) {
-    send('error', { error: e.message });
-  } finally {
-    running = false;
-  }
-}
-
-async function loopSingle(tab, pageInfo) {
-  let url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-  frames.push(url);
-  send('update', {
-    frameCount: frames.length,
-    status: `已截 ${frames.length}/${pageInfo.totalFrames} 帧...`,
-    totalFrames: pageInfo.totalFrames,
-  });
-
-  if (!pageInfo.canScroll) {
-    if (frames.length > 0) await saveSingle('long_screenshot.png');
-    send('complete', { totalFrames: frames.length, mode: 'single' });
-    return;
-  }
-
-  const loopCount = Math.min(pageInfo.totalFrames - 1, MAX_FRAMES - 1);
-  for (let i = 0; i < loopCount && running; i++) {
-    try {
-      await scrollByViewport(tab.id, pageInfo.viewportH);
-      await sleep(delay);
-      url = await chrome.tabs.captureVisibleTab(tab.windowId, { format: 'png' });
-      frames.push(url);
-      send('update', {
-        frameCount: frames.length,
-        status: `已截 ${frames.length}/${pageInfo.totalFrames} 帧 (${Math.round(frames.length / pageInfo.totalFrames * 100)}%)`,
-        totalFrames: pageInfo.totalFrames,
-      });
-    } catch (e) {
-      console.error('[loopSingle] error:', e);
-      break;
-    }
-  }
-
-  if (frames.length > 0) await saveSingle('long_screenshot.png');
-  send('complete', { totalFrames: frames.length, mode: 'single' });
-}
-
-async function saveSingle(filename) {
-  try {
-    const url = await stitch(frames);
-    await new Promise((ok, fail) => {
-      chrome.downloads.download(
-        { url: url, filename: filename, saveAs: true },
-        (id) => {
-          if (chrome.runtime.lastError) fail(chrome.runtime.lastError);
-          else ok(id);
-        }
-      );
-    });
-  } catch (e) {
-    console.error('[saveSingle] err:', e);
-    send('error', { error: e.message });
-  }
-}
-
-// ============================================================
-// 多章采集模式（新功能）
+// 多章采集模式
 // ============================================================
 
 async function startMultiCapture(params) {
@@ -208,7 +117,6 @@ async function startMultiCapture(params) {
     }
 
     send('complete', {
-      mode: 'multi',
       totalChapters: currentChapterNum,
       totalFrames: frames.reduce((sum, f) => sum + f.length, 0),
     });
