@@ -536,7 +536,7 @@ async function getPageTitle(tabId, retry) {
         const out = { title: '', debug: [] };
         // 增加更多选择器
         const sels = [
-          '.muye-reader-nav-title',
+          '.muye-reader-title',  // 章节名（用户确认）
           'h1',
           'h2',
           '.chapter-title',
