@@ -1,12 +1,14 @@
-// popup.js - 弹出窗口逻辑 (v4.0 多章采集版)
+// popup.js - 弹出窗口逻辑 (v4.1 多章采集版)
 let isCapturing = false;
 let port = null;
-let currentMode = 'single'; // 'single' | 'multi'
+let currentMode = 'single';
+let detectedNovelName = '';   // 自动获取的小说名
 
 // ===== DOM 元素 =====
 const modeSingleBtn = document.getElementById('modeSingle');
 const modeMultiBtn = document.getElementById('modeMulti');
 const multiSettings = document.getElementById('multiSettings');
+const novelNameDisplay = document.getElementById('novelNameDisplay');
 const startBtn = document.getElementById('startBtn');
 const stopBtn = document.getElementById('stopBtn');
 
@@ -16,14 +18,42 @@ modeSingleBtn.addEventListener('click', () => {
   modeSingleBtn.classList.add('active');
   modeMultiBtn.classList.remove('active');
   multiSettings.classList.add('hidden');
+  singleSettings.classList.remove('hidden');
 });
 
-modeMultiBtn.addEventListener('click', () => {
+modeMultiBtn.addEventListener('click', async () => {
   currentMode = 'multi';
   modeMultiBtn.classList.add('active');
   modeSingleBtn.classList.remove('active');
   multiSettings.classList.remove('hidden');
+  singleSettings.classList.add('hidden');
+
+  // 切换到多章模式时，自动获取小说名
+  await autoDetectNovelName();
 });
+
+/**
+ * 自动检测小说名称（从当前页面）
+ */
+async function autoDetectNovelName() {
+  novelNameDisplay.textContent = '正在识别...';
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    const p = chrome.runtime.connect({ name: 'popup' });
+    p.onMessage.addListener(function handler(msg) {
+      if (msg.action === 'novelNameDetected') {
+        detectedNovelName = msg.novelName;
+        novelNameDisplay.textContent = msg.novelName;
+        p.onMessage.removeListener(handler);
+        p.disconnect();
+      }
+    });
+    p.postMessage({ action: 'detectNovelName', tabId: tab.id });
+  } catch (e) {
+    novelNameDisplay.textContent = '识别失败，将使用默认名';
+    detectedNovelName = '';
+  }
+}
 
 // ===== 按钮事件 =====
 startBtn.addEventListener('click', startCapture);
@@ -44,12 +74,12 @@ function startCapture() {
 
   // 多章模式额外参数
   if (currentMode === 'multi') {
-    const novelName = document.getElementById('novelName').value.trim();
-    if (!novelName) {
-      alert('请输入小说名称！');
+    // 使用自动获取的小说名
+    if (!detectedNovelName) {
+      alert('正在识别小说名称，请稍候...');
       return;
     }
-    params.novelName = novelName;
+    params.novelName = detectedNovelName;
 
     // 获取采集模式
     const collectModeEl = document.querySelector('input[name="collectMode"]:checked');
@@ -63,10 +93,6 @@ function startCapture() {
       // 根据模式映射
       const modeMap = { '10': 10, '30': 30, 'all': 9999 };
       params.chapterCount = modeMap[params.collectMode] || 10;
-      // free 模式：由 background 动态检测
-      if (params.collectMode === 'free') {
-        params.chapterCount = 9999; // 由 background 判断何时遇到付费章节
-      }
     }
 
     // 清空日志
@@ -175,6 +201,10 @@ function handleMsg(msg) {
 
     case 'log':
       addLog(msg.text, msg.type || 'info');
+      break;
+
+    case 'novelNameDetected':
+      // 由 autoDetectNovelName 中的 listener 处理
       break;
   }
 }

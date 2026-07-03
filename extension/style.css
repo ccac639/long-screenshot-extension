@@ -1,4 +1,4 @@
-/* style.css - 长截图采集（番茄风格 v4.0）*/
+/* style.css - 长截图采集（番茄风格 v4.1）*/
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 body {
@@ -22,9 +22,7 @@ body {
   gap: 8px;
   margin-bottom: 16px;
 }
-.header-icon {
-  font-size: 24px;
-}
+.header-icon { font-size: 24px; }
 .header h1 {
   font-size: 18px;
   color: #333;
@@ -101,7 +99,24 @@ body {
   margin-bottom: 6px;
   font-weight: 500;
 }
-.control-group input[type="text"],
+
+/* 小说名称自动显示 */
+.novel-name-display {
+  padding: 9px 12px;
+  background: #f9f9f9;
+  border: 1.5px solid #e8e8e8;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #333;
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+}
+.novel-name-display::before {
+  content: "📖 ";
+  margin-right: 4px;
+}
+
 .control-group input[type="number"] {
   width: 100%;
   padding: 9px 12px;

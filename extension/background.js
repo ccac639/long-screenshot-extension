@@ -18,7 +18,6 @@ chrome.runtime.onConnect.addListener((port) => {
   ports.push(port);
   port.onMessage.addListener((msg) => {
     if (msg.action === 'start') {
-      // 判断模式
       if (msg.mode === 'multi') {
         startMultiCapture(msg);
       } else {
@@ -26,6 +25,9 @@ chrome.runtime.onConnect.addListener((port) => {
       }
     }
     if (msg.action === 'stop') stop();
+    if (msg.action === 'detectNovelName') {
+      handleDetectNovelName(msg, port);
+    }
   });
   port.onDisconnect.addListener(() => {
     const i = ports.indexOf(port);
@@ -127,13 +129,15 @@ async function saveSingle(filename) {
 async function startMultiCapture(params) {
   delay = params.scrollDelay || 800;
   const chapterDelay = params.chapterDelay || 1500;
-  novelName = params.novelName || '未命名小说';
   totalChapters = params.chapterCount || 10;
   currentChapterNum = 1;
   running = true;
   multiMode = true;
 
-  send('log', { text: `📚 开始多章采集 | 小说: ${novelName} | 目标: ${totalChapters >= 9999 ? '免费章节' : totalChapters + '章'}`, type: 'info' });
+  // 自动获取小说名（不再依赖手动输入）
+  send('log', { text: '🔍 正在自动识别小说名称...', type: 'info' });
+  novelName = await detectNovelName((await chrome.tabs.query({ active: true, currentWindow: true }))[0].id);
+  send('log', { text: `📚 小说名称: ${novelName}`, type: 'success' });
   send('log', { text: `⚙️ 滚动延迟: ${delay}ms | 章节间隔: ${chapterDelay}ms`, type: 'info' });
 
   try {
@@ -265,22 +269,29 @@ async function captureChapter(tab, pageInfo, chapterNum) {
  */
 async function saveChapter(chapterFrames, filename, chapterNum) {
   try {
-    const url = await stitch(chapterFrames);
+    const dataUrl = await stitch(chapterFrames);
 
-    // chrome.downloads.download 会根据路径中的 "/" 自动创建文件夹
+    // 方法：直接用 data URL 下载（Chrome 支持）
+    // filename 中的 "/" 会自动创建文件夹
     await new Promise((ok, fail) => {
       chrome.downloads.download(
-        { url: url, filename: filename, saveAs: false },
+        { url: dataUrl, filename: filename, saveAs: false },
         (id) => {
-          if (chrome.runtime.lastError) fail(chrome.runtime.lastError);
-          else ok(id);
+          if (chrome.runtime.lastError) {
+            // 如果直接下载失败，尝试用 base64 数据创建 blob URL
+            console.warn('[saveChapter] 直接下载失败，尝试备用方法:', chrome.runtime.lastError.message);
+            fail(chrome.runtime.lastError);
+          } else {
+            console.log(`[saveChapter] 第${chapterNum}章下载已启动, id=${id}, 文件: ${filename}`);
+            ok(id);
+          }
         }
       );
     });
 
-    console.log(`[saveChapter] 第${chapterNum}章已保存: ${filename}`);
   } catch (e) {
     console.error(`[saveChapter-${chapterNum}] err:`, e);
+    send('log', { text: `❌ 第${chapterNum}章保存失败: ${e.message}`, type: 'error' });
     throw e;
   }
 }
@@ -408,6 +419,90 @@ function sanitizeFilename(name) {
     .replace(/\s+/g, '_')
     .substring(0, 50)
     .trim() || '未命名';
+}
+
+// ============================================================
+// 小说名自动识别
+// ============================================================
+
+/**
+ * popup 请求识别小说名
+ */
+function handleDetectNovelName(msg, port) {
+  detectNovelName(msg.tabId).then(name => {
+    port.postMessage({ action: 'novelNameDetected', novelName: name });
+  }).catch(() => {
+    port.postMessage({ action: 'novelNameDetected', novelName: '未命名小说' });
+  });
+}
+
+/**
+ * 从页面中自动提取小说名称
+ * 优先级：title解析 > 页面元素 > URL > 域名
+ */
+async function detectNovelName(tabId) {
+  try {
+    const [{ result }] = await chrome.scripting.executeScript({
+      target: { tabId: tabId },
+      func: () => {
+        // 1. 从 document.title 解析
+        const rawTitle = document.title || '';
+        // 常见格式："第X章 XXX - 小说名" 或 "小说名 - 第X章"
+        // 取最后一个 " - " 后面的部分作为小说名
+        const parts = rawTitle.split(/\s*[-–—]\s*/);
+        if (parts.length >= 2) {
+          // "第X章 XXX - 小说名 - 网站名" → 取倒数第二个
+          const candidate = parts[parts.length - 2] || parts[parts.length - 1];
+          // 去掉可能的章节前缀
+          const cleaned = candidate
+            .replace(/^第[0-9零一二三四五六七八九十百千]+章\s*/, '')
+            .replace(/^第[0-9零一二三四五六七八九十百千]+节\s*/, '')
+            .trim();
+          if (cleaned && cleaned.length >= 2 && cleaned.length <= 30) {
+            return { source: 'title', name: cleaned };
+          }
+        }
+
+        // 2. 查找页面中的小说名元素（常见 class/id）
+        const selectors = [
+          '.novel-name', '.book-name', '.bookname', '.novelname',
+          '#book-name', '#novel-name', '#bookname',
+          '.info-name', '.work-name', '.fiction-name',
+          '[itemprop="name"]',
+          'meta[property="og:novel"]',
+          'meta[property="og:title"]',
+        ];
+        for (const sel of selectors) {
+          const el = document.querySelector(sel);
+          if (el) {
+            const txt = (el.textContent || el.content || '').trim();
+            if (txt && txt.length >= 2 && txt.length <= 30) {
+              return { source: 'element', name: txt };
+            }
+          }
+        }
+
+        // 3. 从 URL 路径中提取（最后一段作为小说名）
+        try {
+          const pathParts = location.pathname.split('/').filter(Boolean);
+          const lastPart = pathParts[pathParts.length - 1] || '';
+          const decoded = decodeURIComponent(lastPart).replace(/[_-]/g, ' ').trim();
+          if (decoded && decoded.length >= 2 && decoded.length <= 30 && !/^\d+$/.test(decoded)) {
+            return { source: 'url', name: decoded };
+          }
+        } catch (_) {}
+
+        // 4.  fallback：用域名作为小说名
+        return { source: 'domain', name: location.hostname.replace(/^www\./, '').split('.')[0] || '未命名小说' };
+      },
+    });
+    if (result && result.name) {
+      return result.name;
+    }
+  } catch (e) {
+    console.warn('[detectNovelName] 识别失败:', e.message);
+  }
+  return '未命名小说';
 }
 
 // ============================================================

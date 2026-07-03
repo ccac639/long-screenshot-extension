@@ -10,14 +10,8 @@
   <div class="container">
     <!-- 标题 -->
     <div class="header">
-      <span class="header-icon">🍅</span>
+      <span class="header-icon">📚</span>
       <h1>长截图采集</h1>
-    </div>
-
-    <!-- 提示信息 -->
-    <div class="tip-banner" id="tipBanner">
-      <span class="tip-icon">⚠️</span>
-      <span id="tipText">有未导出的数据</span>
     </div>
 
     <!-- 模式选择 -->
@@ -32,8 +26,8 @@
     <!-- 多章模式设置 -->
     <div id="multiSettings" class="section hidden">
       <div class="control-group">
-        <label for="novelName">小说名称</label>
-        <input type="text" id="novelName" placeholder="例如: 斗破苍穹" value="">
+        <label>小说名称</label>
+        <div id="novelNameDisplay" class="novel-name-display">（开始后将自动识别）</div>
       </div>
 
       <div class="radio-group">
@@ -45,12 +39,6 @@
           <input type="radio" name="collectMode" value="30">
           <span class="radio-label">前30章</span>
         </label>
-        <label class="radio-item">
-          <input type="radio" name="collectMode" value="free">
-          <span class="radio-label">免费章节</span>
-        </label>
-      </div>
-      <div class="radio-group">
         <label class="radio-item radio-item-wide">
           <input type="radio" name="collectMode" value="all">
           <span class="radio-label">全部章节</span>
@@ -61,18 +49,19 @@
         <label for="customCount">自定义章节数（选填）</label>
         <input type="number" id="customCount" value="" min="1" max="9999" placeholder="留空则按上方选择">
       </div>
-    </div>
 
-    <!-- 通用设置 -->
-    <div class="section">
-      <div class="control-group">
-        <label for="scrollDelay">滚动延迟 (ms)</label>
-        <input type="number" id="scrollDelay" value="800" min="100" max="5000" step="100">
-      </div>
       <div class="control-group">
         <label for="chapterDelay">章节间隔 (ms)</label>
         <input type="number" id="chapterDelay" value="1500" min="500" max="10000" step="100">
         <div class="hint">翻页后等待页面加载的时间</div>
+      </div>
+    </div>
+
+    <!-- 单章模式设置 -->
+    <div id="singleSettings" class="section">
+      <div class="control-group">
+        <label for="scrollDelay">滚动延迟 (ms)</label>
+        <input type="number" id="scrollDelay" value="800" min="100" max="5000" step="100">
       </div>
     </div>
 
